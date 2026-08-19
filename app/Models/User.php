@@ -2,15 +2,16 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Enums\TeamRole;
 use Database\Factories\UserFactory;
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
-class User extends Authenticatable
+class User extends Authenticatable implements MustVerifyEmail
 {
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable;
@@ -49,9 +50,31 @@ class User extends Authenticatable
         ];
     }
 
+    /**
+     * @return BelongsToMany<Team, $this>
+     */
     public function teams(): BelongsToMany
     {
         return $this->belongsToMany(Team::class)->withPivot('role')->withTimestamps();
+    }
+
+    /**
+     * Rôle de l'utilisateur dans cette équipe, ou null s'il n'en est pas membre.
+     * Utilisé par les policies : on ne fait jamais confiance à un rôle envoyé
+     * par le client, toujours relu depuis la table pivot team_user.
+     */
+    public function roleIn(Team $team): ?TeamRole
+    {
+        $membership = $this->teams()->where('teams.id', $team->id)->first();
+
+        if ($membership === null) {
+            return null;
+        }
+
+        /** @var string $role */
+        $role = $membership->pivot->getAttribute('role');
+
+        return TeamRole::from($role);
     }
 
     public function assignedTasks(): HasMany

@@ -43,6 +43,9 @@ class Project extends Model
         return $query->where('team_id', $team->id);
     }
 
+    /**
+     * @return BelongsTo<Team, $this>
+     */
     public function team(): BelongsTo
     {
         return $this->belongsTo(Team::class);
