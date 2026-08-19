@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Project;
+use App\Models\Task;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 
 class ProjectController extends Controller
 {
@@ -48,6 +50,26 @@ class ProjectController extends Controller
     {
         return view('projects.show', [
             'project' => $project->load('tasks'),
+        ]);
+    }
+
+    /**
+     * Tableau kanban du projet (todo / in_progress / done).
+     *
+     * Validation module 4 : ≤ 5 requêtes SQL quel que soit le nombre de tâches.
+     * Ici : 1 (résolution de {project} par le binding) + 1 (tasks) + 1 (assignees
+     * via la relation chargée en aval) = 3, indépendamment du nombre de tâches.
+     */
+    public function board(Project $project)
+    {
+        /** @var Collection<int, Task> $projectTasks */
+        $projectTasks = $project->tasks()->with('assignee')->get();
+
+        $tasks = $projectTasks->groupBy(fn (Task $task) => $task->status->value);
+
+        return view('projects.board', [
+            'project' => $project,
+            'tasksByStatus' => $tasks,
         ]);
     }
 

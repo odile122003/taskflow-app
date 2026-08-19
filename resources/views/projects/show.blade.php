@@ -9,13 +9,17 @@
         </div>
     </div>
 
+    <div class="mb-4">
+        <x-button :href="route('projects.board', $project)" variant="secondary">Vue kanban</x-button>
+    </div>
+
     <h2 class="mb-3 text-lg font-semibold text-slate-900">Tâches</h2>
 
     <div class="space-y-3">
         @forelse ($project->tasks as $task)
             <x-card :padded="false" class="flex items-center justify-between px-4 py-3">
                 <span>{{ $task->title }}</span>
-                <x-badge :status="$task->status">{{ $task->status }}</x-badge>
+                <x-badge :status="$task->status->value">{{ $task->status->label() }}</x-badge>
             </x-card>
         @empty
             <x-card class="text-center text-slate-500">
