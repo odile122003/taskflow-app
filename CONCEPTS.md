@@ -151,3 +151,119 @@ jamais `env('STRIPE_KEY')` dans le code applicatif.
 en détail là-bas, pas dupliqué ici.)*
 
 ---
+
+## Module 1 — Routes, contrôleurs, requêtes, réponses
+
+> Note de contexte : ce module a nécessité une anticipation minimale du Module 3
+> (migrations) et du Module 4 (Eloquent) — le binding par slug sur `{project}` exige une
+> vraie table et un vrai modèle. On s'est limité au strict nécessaire : migrations sans
+> fioritures, modèles sans casts avancés/enums/scopes. L'Eloquent complet (accessors,
+> observers, collections...) reste entièrement à voir au Module 4.
+
+### Contrôleurs ressources (`--resource`) et convention REST
+
+`php artisan make:controller ProjectController --resource --model=Project` génère les 7
+méthodes conventionnelles (`index, create, store, show, edit, update, destroy`).
+`Route::resource('projects', ProjectController::class)` les relie toutes en une ligne, avec
+des noms de route cohérents (`projects.index`, `projects.show`, ...) — vérifiable avec
+`php artisan route:list`. Pour une ressource imbriquée (`projects.tasks`), Laravel préfixe
+automatiquement l'URI (`projects/{project}/tasks/{task}`) et les noms de route
+(`projects.tasks.store`...).
+
+Comme les vues Blade n'existent pas encore (Module 2), `create()` et `edit()` (qui servent
+uniquement à afficher un formulaire HTML) renvoient volontairement `abort(501, ...)` pour
+l'instant — la convention REST est respectée dans les routes, l'implémentation suivra.
+
+### Route model binding : implicite, via modèle, avec scope
+
+Trois façons de lier un segment d'URL à un modèle, du plus simple au plus explicite :
+
+1. **Implicite par défaut** — `{project}` dans une route + `Project $project` dans la
+   méthode → Laravel résout par la clé primaire (`id`), sans rien configurer.
+2. **Implicite via le modèle** — en surchargeant `getRouteKeyName()` sur `Project`
+   (fait ici : retourne `'slug'`), **toutes** les routes utilisant `{project}` résolvent
+   par la colonne `slug` au lieu de `id`, partout, sans le répéter dans chaque route.
+   C'est ce qui a été choisi pour TaskFlow (`app/Models/Project.php`).
+   *(Alternative existante mais non utilisée ici : la syntaxe `{project:slug}` directement
+   dans une route définie à la main, pour surcharger la clé au cas par cas plutôt que
+   globalement — utile seulement si certaines routes doivent binder par `id` et d'autres
+   par `slug` pour le même modèle.)*
+3. **Avec scope (`scopeBindings` / `->scoped()`)** — pour une ressource imbriquée
+   `projects.tasks`, `Route::resource('projects.tasks', TaskController::class)->scoped()`
+   contraint automatiquement la résolution de `{task}` à la relation `tasks()` du
+   `{project}` déjà résolu. Concrètement : `/projects/projet-a/tasks/{id}` où `{id}`
+   appartient au projet B renvoie **404**, pas 200 avec la mauvaise tâche.
+
+**Preuve concrète faite sur TaskFlow** : la vérification d'appartenance a d'abord été
+écrite à la main dans `TaskController` (`if ($task->project_id !== $project->id) abort(404)`),
+testée (404 confirmé sur un accès croisé), **puis retirée** au profit de `->scoped()` sur
+la route — testé à nouveau, comportement strictement identique. Ça illustre bien la
+différence entre « comprendre ce que fait le framework » et « laisser le framework le
+faire » : on n'adopte le raccourci qu'après avoir vérifié qu'il fait exactement ce qu'on
+avait écrit à la main.
+
+### L'objet `Request` : `validate()`, pas `all()`
+
+Chaque `store()`/`update()` de TaskFlow utilise `$request->validate([...])`, qui retourne
+**uniquement** les champs validés (jamais `$request->all()` — voir l'interdit `CLAUDE.md`
+§14). Cette validation inline dans le contrôleur est une étape transitoire : le Module 5
+la fera migrer vers des classes `FormRequest` dédiées (`StoreTaskRequest`, etc.), plus
+adaptées quand les règles se complexifient (règles conditionnelles, autorisation...).
+
+### Middlewares : création, alias, application ciblée
+
+Un middleware généré (`php artisan make:middleware Xxx`) doit être **enregistré** pour être
+utilisable par son nom. Depuis Laravel 11+, ça se passe dans `bootstrap/app.php` :
+```php
+->withMiddleware(function (Middleware $middleware) {
+    $middleware->alias(['project.active' => EnsureProjectIsNotArchived::class]);
+    $middleware->append(LogRequestDuration::class); // appliqué à CHAQUE requête
+})
+```
+- `alias()` déclare un nom court utilisable ensuite sur une route ou un contrôleur — le
+  middleware n'agit sur rien tant qu'il n'est pas explicitement attaché quelque part.
+- `append()` l'ajoute directement à la pile globale : il s'exécute sur toutes les requêtes,
+  sans avoir besoin d'un alias (cas de `LogRequestDuration`, exercice 2 — chaque requête,
+  sans exception, doit être journalisée).
+
+**Application ciblée sur certaines actions seulement** — le contrôleur `TaskController`
+implémente `HasMiddleware` (la convention Laravel 11+, remplace l'ancien
+`$this->middleware()` dans le constructeur, qui n'existe plus par défaut — le
+`Controller` de base est vide, voir `app/Http/Controllers/Controller.php`) :
+```php
+public static function middleware(): array
+{
+    return [
+        new Middleware('project.active', only: ['store', 'update', 'destroy']),
+    ];
+}
+```
+`EnsureProjectIsNotArchived` ne bloque donc que la création/modification/suppression de
+tâches sur un projet archivé — la **lecture** (`index`, `show`) reste toujours possible.
+Vérifié concrètement : `POST .../tasks` sur un projet archivé → 403 ; `GET .../tasks` sur
+le même projet → 200.
+
+**Piège vérifié en pratique** : à l'intérieur du middleware, `$request->route('project')`
+renvoie bien l'**instance `Project` déjà résolue** (pas la chaîne `"projet-b"` brute) —
+preuve que la résolution des bindings de route (`SubstituteBindings`) s'exécute **avant**
+le middleware attaché au contrôleur. Si ce n'était pas le cas, `$project instanceof Project`
+serait toujours `false` et le blocage 403 ne se déclencherait jamais silencieusement.
+
+### `web` vs `api` : session et CSRF, vu en pratique (pas en théorie)
+
+Tester les routes avec un `POST` brut (sans passer par un vrai formulaire Blade) a
+immédiatement produit une **erreur 419** — le symptôme exact documenté dans `CLAUDE.md`
+§13 (« 419 Page Expired → `@csrf` manquant »). Cause : les routes de TaskFlow vivent dans
+`routes/web.php`, donc dans le groupe de middleware `web`, qui active la protection CSRF
+et les sessions par défaut (contrairement à un groupe `api`, qui n'a ni session ni CSRF,
+mais qui n'existe pas encore dans ce projet — il arrivera au Module 9 avec Sanctum).
+Pour vérifier les routes correctement, il a donc fallu reproduire le vrai cycle CSRF :
+1. `GET /` pour obtenir le cookie de session + le cookie `XSRF-TOKEN` (posé automatiquement
+   par le middleware CSRF sur toute réponse du groupe `web`).
+2. Renvoyer sa valeur (décodée) dans l'en-tête `X-XSRF-TOKEN` sur les requêtes `POST/PUT/DELETE`
+   suivantes, avec la même session.
+
+C'est exactement ce qu'un navigateur fait tout seul avec un vrai formulaire contenant
+`@csrf` — la manip manuelle ici sert uniquement à vérifier les routes sans interface.
+
+---
