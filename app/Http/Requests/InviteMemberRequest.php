@@ -3,15 +3,23 @@
 namespace App\Http\Requests;
 
 use App\Enums\TeamRole;
+use App\Models\Team;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 class InviteMemberRequest extends FormRequest
 {
+    /**
+     * Seul un Owner ou un Admin de CETTE équipe (celle de l'URL, pas une
+     * équipe quelconque de l'utilisateur) peut y inviter quelqu'un.
+     */
     public function authorize(): bool
     {
-        return true;
+        $team = $this->route('team');
+
+        return $team instanceof Team
+            && in_array($this->user()->roleIn($team), [TeamRole::Owner, TeamRole::Admin], true);
     }
 
     /**
@@ -20,10 +28,10 @@ class InviteMemberRequest extends FormRequest
     public function rules(): array
     {
         return [
-            // Version Module 5 : ajoute un utilisateur *existant* à l'équipe.
-            // L'invitation d'un e-mail qui n'a pas encore de compte (URL signée,
-            // mail envoyé) est une fonctionnalité du Module 6 (Auth), pas de celui-ci.
-            'email' => ['required', 'email', 'exists:users,email'],
+            // Pas de `exists:users,email` : une adresse sans compte est un cas
+            // valide (le Module 6 lui envoie une invitation par URL signée
+            // plutôt que de refuser la requête).
+            'email' => ['required', 'email'],
             'role' => ['required', Rule::enum(TeamRole::class)],
         ];
     }
@@ -37,16 +45,6 @@ class InviteMemberRequest extends FormRequest
     {
         return [
             'email' => 'adresse e-mail',
-        ];
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    public function messages(): array
-    {
-        return [
-            'email.exists' => 'Aucun compte ne correspond à cette :attribute.',
         ];
     }
 }

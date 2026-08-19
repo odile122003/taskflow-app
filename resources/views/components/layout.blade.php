@@ -4,6 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ $title }}</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
@@ -14,9 +15,29 @@
                 TaskFlow
             </a>
 
-            <a href="{{ route('dashboard') }}" class="text-sm text-slate-600 hover:text-slate-900">
-                Tableau de bord
-            </a>
+            <div class="flex items-center gap-6">
+                @auth
+                    <a href="{{ route('dashboard') }}" class="text-sm text-slate-600 hover:text-slate-900">
+                        Tableau de bord
+                    </a>
+                    <a href="{{ route('profile.edit') }}" class="text-sm text-slate-600 hover:text-slate-900">
+                        {{ auth()->user()->name }}
+                    </a>
+                    <form method="POST" action="{{ route('logout') }}">
+                        @csrf
+                        <button type="submit" class="text-sm text-slate-600 hover:text-slate-900">
+                            Déconnexion
+                        </button>
+                    </form>
+                @else
+                    <a href="{{ route('login') }}" class="text-sm text-slate-600 hover:text-slate-900">
+                        Connexion
+                    </a>
+                    <a href="{{ route('register') }}" class="text-sm text-slate-600 hover:text-slate-900">
+                        Inscription
+                    </a>
+                @endauth
+            </div>
         </nav>
     </header>
 

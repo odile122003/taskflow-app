@@ -6,8 +6,9 @@ use App\Models\Team;
 
 /**
  * Contexte "équipe courante", lié au conteneur en singleton (voir AppServiceProvider).
- * Vide par défaut (aucun filtrage) — c'est l'authentification (Module 6) qui le
- * peuplera avec l'équipe active de l'utilisateur connecté, sur chaque requête.
+ * Peuplé à chaque requête authentifiée par le middleware SetCurrentTeam avec
+ * l'équipe de l'utilisateur connecté. Vide (donc sans filtrage) pour un invité
+ * ou une commande Artisan exécutée hors contexte HTTP.
  */
 class CurrentTeam
 {

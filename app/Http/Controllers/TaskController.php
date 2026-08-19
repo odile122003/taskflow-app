@@ -24,6 +24,8 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function index(Project $project)
     {
+        $this->authorize('view', $project);
+
         return $project->tasks;
     }
 
@@ -40,6 +42,8 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function store(StoreTaskRequest $request, Project $project)
     {
+        $this->authorize('create', [Task::class, $project]);
+
         $data = CreateTaskData::fromArray($request->validated());
 
         /** @var Task $task */
@@ -64,6 +68,8 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function show(Project $project, Task $task)
     {
+        $this->authorize('view', $task);
+
         return $task;
     }
 
@@ -80,6 +86,8 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function update(UpdateTaskRequest $request, Project $project, Task $task)
     {
+        $this->authorize('update', $task);
+
         $validated = $request->validated();
 
         $task->update($validated);
@@ -96,6 +104,8 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function destroy(Project $project, Task $task)
     {
+        $this->authorize('delete', $task);
+
         $task->delete();
 
         return response()->noContent();
