@@ -129,4 +129,25 @@ les appels par façade → **c'est rigoureusement la même instance** dans les d
 binding avait été un `bind()` simple (au lieu de `singleton()`), chaque résolution aurait
 créé une nouvelle instance et le compteur serait reparti de zéro à chaque appel.
 
+### `config/`, `.env` et `config:cache`
+
+- `config/*.php` — chaque fichier retourne un tableau PHP de configuration (`config/app.php`,
+  `config/database.php`, etc.). C'est **la seule couche officielle** de configuration :
+  le reste de l'application doit lire `config('app.name')`, jamais directement l'environnement.
+- `.env` — variables spécifiques à la machine/l'environnement (secrets, URL de base de
+  données, clés API). Chargé au tout début du cycle de vie, **avant** que les fichiers de
+  `config/` soient évalués. Les fichiers de `config/` font le pont via `env('APP_NAME', 'Laravel')`.
+- `php artisan config:cache` — fusionne tous les fichiers de `config/` (avec les valeurs
+  `.env` déjà résolues) en un seul fichier compilé dans `bootstrap/cache/config.php`, pour
+  éviter de reparser tous les fichiers PHP à chaque requête en production.
+
+**Piège directement lié** (déjà documenté dans `CLAUDE.md` §4) : une fois `config:cache`
+exécuté, tout appel à `env()` **en dehors** d'un fichier `config/*.php` renvoie `null` —
+parce que ce cache ne contient plus le fichier `.env` du tout, seulement les valeurs déjà
+résolues au moment du `config:cache`. D'où la règle : toujours `config('services.stripe.key')`,
+jamais `env('STRIPE_KEY')` dans le code applicatif.
+
+*(Structure des dossiers et conventions de nommage : voir `CLAUDE.md` §6-7, déjà couvert
+en détail là-bas, pas dupliqué ici.)*
+
 ---
