@@ -3,12 +3,14 @@
 namespace Database\Seeders;
 
 use App\Models\User;
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
 {
-    use WithoutModelEvents;
+    // Pas de WithoutModelEvents ici : DemoSeeder compte sur TaskObserver (déclenché
+    // par un vrai `update()`, pas par `create()`) pour renseigner `completed_at`
+    // quand une tâche passe à "done" — désactiver les événements de modèle le
+    // laisserait silencieusement à null. Détail complet dans CONCEPTS.md (Module 4).
 
     /**
      * Seed the application's database.
