@@ -369,3 +369,160 @@ pour prouver qu'elle disparaît bien. Page `/projects/{slug}` capturée avec tâ
 projet. »). Aucune erreur console JS.
 
 ---
+
+## Module 3 — Base de données, migrations, seeders
+
+### Passage de SQLite à MySQL pour le développement
+
+Jusqu'ici le projet tournait sur SQLite par défaut (squelette Laravel 12). `CLAUDE.md`
+§3.1 prévoit MySQL/PostgreSQL comme base **de développement**, SQLite réservé aux tests.
+Un serveur MySQL 8 était déjà disponible sur la machine → bascule effective : `.env`
+pointe maintenant sur `mysql`/`taskflow`, pendant que `phpunit.xml` force `DB_CONNECTION=sqlite`
++ `DB_DATABASE=:memory:` **indépendamment du `.env`** — donc les tests restent rapides et
+isolés sans configuration supplémentaire, exactement la séparation prévue.
+
+### Schéma complet de TaskFlow
+
+Onze tables au total : `users`, `teams`, `team_user` (pivot), `projects`, `tasks`,
+`comments`, `tags`, `taggables` (pivot polymorphe), `attachments`, `activities`,
+`notifications`. Deux familles de tables :
+
+- **Relations classiques** : `team_user` (`team_id`, `user_id`, `role`, `unique(team_id, user_id)`)
+  — pivot simple avec colonne supplémentaire, exactement le cas d'usage qui justifie une
+  vraie table pivot plutôt qu'un simple `belongsToMany` sans données propres.
+- **Relations polymorphes (schéma seulement)** : `comments`, `taggables`, `attachments`,
+  `activities` utilisent `$table->morphs('commentable')` etc., qui crée en une ligne les
+  deux colonnes (`commentable_type`, `commentable_id`) **et** leur index composite. Le
+  code Eloquent qui exploite ce schéma (`morphTo`, `morphMany`) est volontairement
+  **repoussé au Module 4** — ici, on pose juste des colonnes structurées pour ne pas avoir
+  à retoucher le schéma plus tard. `Comment::factory()->on($task)` peuple ces colonnes
+  directement (`commentable_type`/`commentable_id`) sans passer par une relation Eloquent,
+  qui n'existe pas encore.
+
+Table `notifications` créée via la commande standard `php artisan notifications:table`
+(uuid, `notifiable_type`/`id`, `data` JSON, `read_at`) — c'est exactement le schéma que le
+canal `database` des notifications (Module 7) consommera telle quelle, sans y toucher.
+
+### Piège rencontré en vrai : `HasFactory` oublié
+
+Premier `migrate:fresh --seed` : `BadMethodCallException: Call to undefined method
+App\Models\Team::factory()`. Cause : aucun de nos modèles (`Project`, `Task` compris,
+depuis le Module 1) n'avait le trait `use HasFactory`. Le stub généré par
+`make:model` ne l'inclut pas automatiquement dans ce projet — il faut l'ajouter à la
+main dès qu'on veut une factory. Corrigé sur les 7 modèles concernés. **Ce bug dormait
+depuis le Module 1** sans se manifester, simplement parce qu'on n'avait jamais encore
+appelé `::factory()` dessus.
+
+### Factories : états et séquences
+
+```php
+// États nommés (ProjectFactory) — s'empilent à l'usage : Project::factory()->archived()->create()
+public function archived(): static
+{
+    return $this->state(fn (array $attributes) => ['is_archived' => true]);
+}
+```
+```php
+// Séquence (DemoSeeder) — fait tourner un tableau d'états sur les modèles créés
+Task::factory()->count(8)->for($project)->sequence(
+    ['status' => 'todo'],
+    ['status' => 'in_progress'],
+    ['status' => 'done'],
+)->create();
+// tâche 1 → todo, tâche 2 → in_progress, tâche 3 → done, tâche 4 → todo, ...
+```
+`->for($project)` fonctionne parce que `Task::project(): BelongsTo` existe déjà (posé au
+Module 1) — Laravel s'en sert pour déduire automatiquement `project_id`. À l'inverse,
+`Project` n'a pas encore de relation `team()` (Module 4), donc `team_id` est passé
+explicitement en état plutôt que via `->for()`.
+
+### Transaction : `DB::transaction()`
+
+Dans `DemoSeeder`, la création de l'équipe et l'insertion des lignes `team_user` sont
+enveloppées dans `DB::transaction(function () { ... return $team; })`. Si l'insertion
+des membres échouait à mi-chemin (contrainte violée, erreur réseau...), **toute
+l'opération serait annulée** — jamais d'équipe orpheline sans membres en base. C'est le
+critère pour décider d'une transaction : plusieurs écritures qui doivent réussir
+**ensemble ou pas du tout**.
+
+*(`lockForUpdate()` — verrou pessimiste posé sur une ligne pendant une transaction pour
+empêcher deux processus de la modifier en même temps, ex. `Task::where(...)->lockForUpdate()->first()`
+dans une transaction — n'a pas encore de cas d'usage réel dans TaskFlow (pas d'écriture
+concurrente à protéger pour l'instant) : concept noté ici, sera exercé quand un vrai
+scénario de concurrence apparaîtra, ex. compteur partagé ou changement de statut kanban.)*
+
+### Query Builder : `groupBy`/`having`, `join`, sous-requête — testés en vrai
+
+```php
+DB::table('tasks')
+    ->select('project_id', DB::raw('COUNT(*) as todo_count'))
+    ->where('status', 'todo')
+    ->groupBy('project_id')
+    ->having('todo_count', '>', 5)
+    ->get();
+// → [{project_id: 1, todo_count: 16638}] (sur le jeu de test de l'exercice 2)
+
+DB::table('tasks')
+    ->join('projects', 'projects.id', '=', 'tasks.project_id')
+    ->where('tasks.status', 'done')
+    ->select('tasks.title', 'projects.name as project_name')
+    ->get();
+```
+Ces deux requêtes ont été exécutées pour de vrai contre la base (pas juste écrites) —
+`groupBy`+`having` filtre sur un agrégat calculé, `join` combine deux tables en une seule
+requête au lieu de deux requêtes séparées + boucle PHP (ce qui serait un N+1, sujet
+central du Module 4).
+
+### Exercice 1 — Index composite `(project_id, status)` et règle du préfixe gauche
+
+Migration dédiée `add_project_id_status_index_to_tasks_table` :
+```php
+$table->index(['project_id', 'status']);
+```
+
+**Piège rencontré en essayant de le retirer pour comparer avant/après** :
+```
+SQLSTATE[HY000]: General error: 1553 Cannot drop index 'tasks_project_id_status_index':
+needed in a foreign key constraint
+```
+MySQL utilise cet index composite pour supporter la contrainte de clé étrangère sur
+`project_id` (colonne en tête de l'index) — impossible de le supprimer seul sans casser
+la FK. Plutôt que de contourner (dropper puis recréer la FK), ça a mené à une démonstration
+plus juste : la **règle du préfixe gauche** d'un index composite, vérifiée avec `EXPLAIN`
+sur un jeu de 50 000 tâches (exercice 2) :
+
+| Requête | `type` | `key` utilisée | `rows` examinées |
+|---|---|---|---|
+| `WHERE project_id = ? AND status = ?` | `ref` | `tasks_project_id_status_index` | 24 995 |
+| `WHERE project_id = ?` seul | `ref` | `tasks_project_id_status_index` | 24 995 |
+| `WHERE status = ?` seul | **`ALL`** (scan complet) | *(aucune)* | 49 990 |
+
+La colonne `status` n'étant **pas en tête** de l'index `(project_id, status)`, MySQL ne
+peut pas s'en servir quand elle est filtrée seule — comme chercher un nom dans un
+annuaire trié par prénom : l'index ne sert à rien si on ne connaît pas le prénom.
+**Conclusion pratique** : l'ordre des colonnes dans un index composite doit suivre l'ordre
+des filtres les plus fréquents dans le code, pas un ordre arbitraire.
+
+### Exercice 2 — 50 000 tâches et chronométrage
+
+`database/seeders/LargeTaskSeeder.php` insère 50 000 lignes par lots de 1 000
+(`DB::table('tasks')->insert($rows)`) plutôt que 50 000 appels à `Task::create()` un par
+un (qui aurait été dramatiquement plus lent — chaque `create()` Eloquent fait une requête
+individuelle, un insert en masse en fait une par lot). Ne fait **pas** partie du seed de
+démo courant : s'exécute à la demande via `php artisan db:seed --class=LargeTaskSeeder`.
+
+Chronométrage réel sur ce jeu de données :
+```
+project_id + status (index utilisé) : 33.86 ms
+status seul (scan complet)          : 31.22 ms
+```
+Différence quasi nulle en temps réel, alors que `EXPLAIN` montre un écart net de plan
+d'exécution (24 995 lignes examinées contre 49 990). **Leçon honnête** : à 50 000 lignes,
+MySQL garde toute la table en cache mémoire (InnoDB buffer pool), donc le scan complet
+reste rapide malgré tout — l'intérêt de l'index se lira dans le **plan** (`EXPLAIN`) avant
+de se voir clairement en millisecondes. L'écart deviendrait flagrant en temps réel à partir
+de plusieurs millions de lignes, ou sur un serveur avec moins de mémoire disponible que la
+taille de la table. Ne pas se fier uniquement au chronomètre pour juger un index — lire le
+plan d'exécution est plus fiable.
+
+---
