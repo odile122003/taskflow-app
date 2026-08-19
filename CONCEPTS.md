@@ -776,3 +776,116 @@ des trois requêtes n'est exécutée dans une boucle, seule la liste de valeurs 
 grandit avec le nombre d'assignés distincts — jamais le nombre de requêtes lui-même.
 
 ---
+
+## Module 5 — Validation et objets de requête
+
+### Form Request plutôt que `$request->validate()`
+
+Depuis le Module 1, `ProjectController`/`TaskController` validaient en ligne
+(`$request->validate([...])`). Remplacé par des classes dédiées
+(`StoreProjectRequest`, `UpdateProjectRequest`, `StoreTaskRequest`, `UpdateTaskRequest`,
+`InviteMemberRequest`) : le contrôleur reçoit directement des données déjà validées
+(type-hint sur la classe de la requête), sans un seul appel à `validate()` dans son corps.
+Chaque Form Request a sa propre méthode `authorize()` — actuellement `return true` partout
+(pas de Policy avant le Module 6), mais l'emplacement existe déjà : le Module 6 n'aura
+qu'à changer cette méthode, jamais les routes ni les contrôleurs.
+
+### Règles rencontrées, chacune avec un usage réel dans TaskFlow
+
+| Règle | Où | Rôle |
+|---|---|---|
+| `sometimes` | `UpdateProjectRequest`, `UpdateTaskRequest` | Ne valide un champ que s'il est présent dans la requête (mise à jour partielle) |
+| `required_if:priority,high` | `StoreTaskRequest.due_date` | Rend l'échéance obligatoire **seulement** si la priorité est `high` |
+| `Rule::unique(...)->ignore($project)` | `UpdateProjectRequest.slug` | Unique, **sauf** par rapport à sa propre ligne (sinon impossible de ré-enregistrer un projet sans changer son slug) |
+| `Rule::in(['low','normal','high'])` | `StoreTaskRequest.priority` | Liste de valeurs autorisées, définie à la main |
+| `Rule::enum(TaskStatus::class)` | `UpdateTaskRequest.status` | Même chose, mais dérivée d'un enum PHP (Module 4) — une seule source de vérité entre le cast du modèle et la validation |
+| `'tags' => 'array'`, `'tags.*' => 'exists:tags,id'` | `StoreTaskRequest` | Valide un tableau **et** chacun de ses éléments |
+| Classe `NotAssignedToArchivedProject` | `StoreTaskRequest`/`UpdateTaskRequest.assignee_id` | Règle métier personnalisée, voir plus bas |
+
+### Règle personnalisée : complète le middleware, ne le remplace pas
+
+`NotAssignedToArchivedProject` (implémente `ValidationRule`) empêche d'assigner quelqu'un
+à une tâche d'un projet archivé. **Constat en la testant** : sur les routes actuelles,
+cette règle ne se déclenche jamais en pratique — le middleware `EnsureProjectIsNotArchived`
+(Module 1) bloque déjà `store`/`update` sur un projet archivé avec un 403, **avant** que
+la validation ne s'exécute. La règle a donc été vérifiée **isolément** (instanciée
+directement, `->validate()` appelé à la main avec un projet archivé puis actif) plutôt que
+via une requête HTTP réelle — sinon impossible de l'atteindre. Gardée quand même : défense
+en profondeur (si le middleware est un jour retiré ou que le champ est validé ailleurs,
+par exemple une future API), et message d'erreur rattaché au bon champ de formulaire
+plutôt qu'un simple 403 générique.
+
+### DTO : `CreateTaskData`
+
+```php
+final readonly class CreateTaskData
+{
+    public function __construct(
+        public string $title,
+        public ?string $priority,
+        public ?string $dueDate,
+        public ?int $assigneeId,
+        public array $tagIds,
+    ) {}
+
+    public static function fromArray(array $validated): self { /* ... */ }
+}
+```
+Entre `$request->validated()` (un tableau, aucune garantie de forme) et la création de la
+tâche, `TaskController::store()` construit ce DTO. Bénéfice concret : les noms de
+propriétés sont vérifiés par PHP (`$data->title`, pas `$data['titel']` qui planterait
+silencieusement avec un tableau). L'extraction vers une vraie classe Action/Service qui
+consommerait ce DTO (au lieu du contrôleur lui-même) est le sujet du Module 11 — ici, le
+DTO existe déjà, seul son consommateur final changera.
+
+### Traduction complète en français
+
+`php artisan lang:publish` a fait apparaître `lang/en/*.php` (fichiers absents du
+squelette Laravel par défaut). Traduits intégralement vers `lang/fr/` (`validation.php`,
+`auth.php`, `passwords.php`, `pagination.php`), `APP_LOCALE=fr` dans `.env`. Trois niveaux
+de personnalisation, du plus général au plus spécifique :
+1. `lang/fr/validation.php` → messages par règle (« Le champ :attribute est obligatoire »).
+2. `lang/fr/validation.php['attributes']` → noms de champs en français, appliqués partout
+   (`slug` → « identifiant », etc.).
+3. `messages()`/`attributes()` dans un Form Request précis (`InviteMemberRequest`) →
+   surcharge locale, prioritaire sur les deux niveaux précédents.
+
+**Vérifié avec de vraies requêtes HTTP**, pas en lisant le code :
+```
+titre manquant          -> "Le champ titre est obligatoire."
+priority=high sans date -> "La date d'échéance est obligatoire pour une tâche de priorité haute."
+tag inexistant           -> "La valeur sélectionnée pour tags.0 est invalide."
+email inexistant         -> "Aucun compte ne correspond à cette adresse e-mail." (message personnalisé)
+rôle invalide             -> "La valeur sélectionnée pour rôle est invalide." (Rule::enum + attribut traduit)
+```
+
+### `old()` / `@error` — vues réelles, pas juste une API JSON
+
+Les actions `create()`/`edit()` de `ProjectController` renvoyaient `abort(501, ...)`
+depuis le Module 1 (Blade pas encore couvert). Corrigées maintenant : vrais formulaires
+(`projects/create.blade.php`, `projects/edit.blade.php`) avec `@csrf`, `@method('PUT')`,
+`old('name', $project->name)` (pré-remplit avec la valeur soumise en cas d'erreur, sinon
+retombe sur la valeur actuelle du modèle en édition) et `@error('champ')` sous chaque
+input. Testé dans un vrai navigateur : formulaire vide soumis → erreurs françaises
+affichées sous les bons champs ; formulaire rempli → redirection + bannière verte
+« Projet créé. » (`session('success')`, affichée une fois dans le layout) ; slug déjà pris
+en édition → erreur d'unicité sous le champ concerné, la valeur fautive reste dans le champ.
+
+### Piège réel trouvé en testant le formulaire dans un navigateur
+
+Premier test du formulaire de création : soumission réussie en apparence, mais l'URL
+finale était `/projects` au lieu de `/projects/{slug}`, et la page affichée n'avait plus
+la mise en page habituelle. Cause : `Project::create($request->validated())` n'incluait
+jamais `team_id` — colonne `NOT NULL` avec clé étrangère (Module 3) — donc l'insertion SQL
+échouait, et comme la requête `POST` et la route `GET /projects` (index) partagent la
+même URI `/projects`, la page d'erreur Laravel (mode debug) s'affichait à cette URI,
+donnant l'illusion d'un retour normal à la liste. **Cause racine** : il n'y a pas encore
+d'utilisateur connecté (Module 6) pour déduire à quelle équipe rattacher le nouveau
+projet. Corrigé provisoirement : le contrôleur rattache le projet à l'équipe du contexte
+`CurrentTeam` (Module 4) si présente, sinon à la première équipe existante — avec un
+commentaire explicite disant que le Module 6 remplacera cette logique par l'équipe réelle
+de l'utilisateur connecté. Sans le test dans un vrai navigateur, ce bug serait resté
+invisible : `php artisan test` ne le couvrait pas, et lire le code ne le révèle pas
+(le `$fillable` de `Project` autorise `team_id`, rien ne signale qu'il manque).
+
+---
