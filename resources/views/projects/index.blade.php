@@ -25,19 +25,24 @@
                             {{ $project->is_archived ? 'Archivé' : 'Actif' }}
                         </x-badge>
 
-                        <x-modal>
-                            <x-slot:trigger>
-                                <x-button variant="secondary">Aperçu</x-button>
-                            </x-slot:trigger>
+                        <x-button
+                            type="button"
+                            variant="secondary"
+                            x-data=""
+                            x-on:click="$dispatch('open-modal', 'project-preview-{{ $project->id }}')"
+                        >Aperçu</x-button>
 
-                            <h3 class="text-lg font-semibold">{{ $project->name }}</h3>
-                            <p class="mt-2 text-sm text-slate-600">Identifiant : {{ $project->slug }}</p>
-                            <p class="mt-1 text-sm text-slate-600">
-                                Statut :
-                                <x-badge :status="$project->is_archived ? 'archived' : 'active'">
-                                    {{ $project->is_archived ? 'Archivé' : 'Actif' }}
-                                </x-badge>
-                            </p>
+                        <x-modal :name="'project-preview-'.$project->id">
+                            <div class="p-6">
+                                <h3 class="text-lg font-semibold">{{ $project->name }}</h3>
+                                <p class="mt-2 text-sm text-slate-600">Identifiant : {{ $project->slug }}</p>
+                                <p class="mt-1 text-sm text-slate-600">
+                                    Statut :
+                                    <x-badge :status="$project->is_archived ? 'archived' : 'active'">
+                                        {{ $project->is_archived ? 'Archivé' : 'Actif' }}
+                                    </x-badge>
+                                </p>
+                            </div>
                         </x-modal>
                     </div>
                 </div>
