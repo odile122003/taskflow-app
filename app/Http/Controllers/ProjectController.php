@@ -6,7 +6,6 @@ use App\Http\Requests\StoreProjectRequest;
 use App\Http\Requests\UpdateProjectRequest;
 use App\Models\Project;
 use App\Models\Task;
-use App\Models\Team;
 use App\Support\CurrentTeam;
 use Illuminate\Support\Collection;
 
@@ -17,6 +16,8 @@ class ProjectController extends Controller
      */
     public function index()
     {
+        $this->authorize('viewAny', Project::class);
+
         return view('projects.index', [
             'projects' => Project::query()->latest()->get(),
         ]);
@@ -27,22 +28,22 @@ class ProjectController extends Controller
      */
     public function create()
     {
+        $this->authorize('create', Project::class);
+
         return view('projects.create');
     }
 
     /**
      * Store a newly created resource in storage.
      */
-    public function store(StoreProjectRequest $request)
+    public function store(StoreProjectRequest $request, CurrentTeam $currentTeam)
     {
-        // Pas d'authentification avant le Module 6 : le nouveau projet est
-        // rattaché provisoirement à l'équipe courante du contexte (vide pour
-        // l'instant, voir CurrentTeam) ou, à défaut, à la première équipe
-        // existante. Le Module 6 remplacera ceci par l'équipe réelle de
-        // l'utilisateur connecté — team_id ne viendra jamais du formulaire.
-        $teamId = app(CurrentTeam::class)->id() ?? Team::query()->value('id');
+        $this->authorize('create', Project::class);
 
-        $project = Project::create([...$request->validated(), 'team_id' => $teamId]);
+        // team_id ne vient jamais du formulaire : c'est toujours l'équipe de
+        // l'utilisateur connecté (peuplée par le middleware SetCurrentTeam),
+        // jamais une valeur choisie par le client.
+        $project = Project::create([...$request->validated(), 'team_id' => $currentTeam->id()]);
 
         return redirect()->route('projects.show', $project)->with('success', 'Projet créé.');
     }
@@ -52,6 +53,8 @@ class ProjectController extends Controller
      */
     public function show(Project $project)
     {
+        $this->authorize('view', $project);
+
         return view('projects.show', [
             'project' => $project->load('tasks'),
         ]);
@@ -66,6 +69,8 @@ class ProjectController extends Controller
      */
     public function board(Project $project)
     {
+        $this->authorize('view', $project);
+
         /** @var Collection<int, Task> $projectTasks */
         $projectTasks = $project->tasks()->with('assignee')->get();
 
@@ -82,6 +87,8 @@ class ProjectController extends Controller
      */
     public function edit(Project $project)
     {
+        $this->authorize('update', $project);
+
         return view('projects.edit', ['project' => $project]);
     }
 
@@ -90,6 +97,8 @@ class ProjectController extends Controller
      */
     public function update(UpdateProjectRequest $request, Project $project)
     {
+        $this->authorize('update', $project);
+
         $project->update($request->validated());
 
         return redirect()->route('projects.show', $project)->with('success', 'Projet mis à jour.');
@@ -100,6 +109,8 @@ class ProjectController extends Controller
      */
     public function destroy(Project $project)
     {
+        $this->authorize('delete', $project);
+
         $project->delete();
 
         return redirect()->route('projects.index')->with('success', 'Projet supprimé.');
