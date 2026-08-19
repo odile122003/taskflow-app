@@ -889,3 +889,208 @@ invisible : `php artisan test` ne le couvrait pas, et lire le code ne le révèl
 (le `$fillable` de `Project` autorise `team_id`, rien ne signale qu'il manque).
 
 ---
+
+## Module 6 — Authentification, autorisation, sécurité
+
+### Breeze : ce qu'il génère, et le piège de l'installation sur un projet existant
+
+`composer require laravel/breeze --dev` puis `php artisan breeze:install blade` génèrent :
+contrôleurs `app/Http/Controllers/Auth/*` (inscription, connexion, vérification e-mail,
+reset password, confirmation de mot de passe), leurs Form Requests, les vues
+`resources/views/auth/*`, une vue profil, et `routes/auth.php`.
+
+**Piège réel, découvert avant même de lire une ligne de code métier** : `breeze:install`
+**écrase sans prévenir** des fichiers déjà présents. Sur ce projet, trois collisions :
+- `routes/web.php` remplacé intégralement — toutes les routes `projects`/`tasks`/`dashboard`
+  du Module 1 disparues.
+- `resources/views/dashboard.blade.php` remplacé par un placeholder `<x-app-layout>` qui
+  n'a plus rien à voir avec le vrai tableau de bord du Module 4.
+- Le stack Blade de Breeze 2.4 date d'avant Tailwind 4 : il régénère `tailwind.config.js`
+  et `postcss.config.js` (config JS, syntaxe v3) et réécrit `resources/css/app.css` avec
+  `@tailwind base/components/utilities` au lieu de `@import 'tailwindcss'` — en retirant au
+  passage le plugin Vite `@tailwindcss/vite`.
+
+Réaction : **ne rien corriger en silence**. `git diff` sur chaque fichier écrasé pour voir
+exactement ce qui a changé, puis fusion manuelle — reprendre nos fichiers existants et n'y
+intégrer que l'apport réel de Breeze (`require __DIR__.'/auth.php'`, routes de profil,
+dépendances npm utiles comme `@tailwindcss/forms`). Le composant `<x-modal>` du Module 2
+a aussi été remplacé par une version Breeze plus complète (pilotée par événements
+`$dispatch('open-modal', 'nom')` plutôt que par un slot `trigger`) : gardée, car réellement
+meilleure (piégeage du focus, `Échap`, transitions), avec `projects/index.blade.php` adapté
+à la nouvelle API plutôt que l'inverse.
+
+### Guards et providers
+
+`config/auth.php` : un **guard** définit *comment* on vérifie l'identité (`web` → session),
+un **provider** définit *où* trouver l'utilisateur (`users` → Eloquent, modèle `User`).
+Sanctum (Module 9) ajoutera un second guard (`sanctum`, token) sans toucher au premier —
+c'est cette séparation qui permet à la même application de servir des pages web
+authentifiées par session et une API authentifiée par token.
+Doc : https://laravel.com/docs/12.x/authentication#introduction
+
+### `CurrentTeam` enfin peuplé — et un vrai bug de double exécution
+
+Le contexte `CurrentTeam` (singleton, Module 4) était vide jusqu'ici. Peuplé maintenant par
+un middleware dédié :
+
+```php
+class SetCurrentTeam
+{
+    public function handle(Request $request, Closure $next): Response
+    {
+        if (($user = $request->user()) !== null) {
+            app(CurrentTeam::class)->set($user->teams()->first());
+        }
+        return $next($request);
+    }
+}
+```
+
+appliqué avec `auth`/`verified` sur toutes les routes de l'application (`routes/web.php`).
+Un utilisateur peut appartenir à plusieurs équipes (table pivot `team_user`) : en
+attendant un vrai sélecteur d'équipe dans l'interface, on retient la première — limitation
+assumée et documentée dans le code, pas cachée.
+
+Comme un projet ne peut pas exister sans équipe, chaque inscription crée une équipe
+personnelle via un listener sur l'événement `Registered` :
+
+```php
+class CreatePersonalTeam
+{
+    public function handle(Registered $event): void
+    {
+        $team = Team::create(['name' => "Équipe de {$event->user->name}", 'slug' => ...]);
+        $team->users()->attach($event->user, ['role' => TeamRole::Owner->value]);
+    }
+}
+```
+
+**Piège réel** : ce listener s'exécutait **deux fois par inscription**, provoquant une
+violation de contrainte d'unicité sur le slug (`Duplicate entry 'bob-nouveau-7'`). Cause :
+Laravel 12 **découvre automatiquement** les listeners du dossier `app/Listeners` par
+convention (le type du paramètre de `handle()` suffit) — l'enregistrer *en plus* à la main
+via `Event::listen()` dans `AppServiceProvider::boot()` le faisait tourner deux fois pour
+le même événement. Contrairement aux Observers de modèles (toujours enregistrés à la main,
+`Task::observe(...)`), les listeners d'événements n'ont pas besoin de l'être. Trouvé en
+testant une vraie inscription dans un navigateur, pas en relisant le code.
+
+### Policies : `Gate`, `authorize()`, `before()`
+
+Une policy par modèle sensible (`ProjectPolicy`, `TaskPolicy`), auto-découvertes par
+Laravel (convention `App\Models\Foo` → `App\Policies\FooPolicy`, aucun enregistrement
+requis). Le rôle réel de l'utilisateur est **toujours relu depuis la base**
+(`User::roleIn(Team $team)`, table pivot `team_user`), jamais fait confiance depuis une
+requête. Doc : https://laravel.com/docs/12.x/authorization#creating-policies
+
+`before()` court-circuite les autres méthodes pour un cas transverse — ici, le ou la
+Owner d'une équipe peut toujours tout faire sur les ressources de cette équipe :
+
+```php
+public function before(User $user, string $ability, mixed $arg = null): ?bool
+{
+    if ($arg instanceof Project && $user->roleIn($arg->team) === TeamRole::Owner) {
+        return true; // court-circuite view/update/delete
+    }
+    return null; // laisse les autres méthodes décider (viewAny/create : $arg est une string)
+}
+```
+Point d'attention réel : `$arg` n'est **pas toujours une instance du modèle**. Pour
+`viewAny`/`create` (pas encore d'instance), Laravel passe le **nom de classe**
+(`Project::class`, une string) — `before()` doit gérer les deux cas (`instanceof`), sinon
+`TypeError` sur un paramètre trop strictement typé.
+
+Chaque policy retourne `Illuminate\Auth\Access\Response::deny('message en français')`
+plutôt qu'un simple `false` : un `false` nu produit le message générique anglais de
+Laravel (« This action is unauthorized. »), visible sur la page d'erreur 403 — repéré en
+testant un accès refusé dans un vrai navigateur, incohérent avec une application entièrement
+en français.
+
+Contrôleurs : `$this->authorize('view', $project)` (nécessite le trait
+`AuthorizesRequests` sur le contrôleur de base — absent du squelette Laravel 12 minimal,
+ajouté à `app/Http/Controllers/Controller.php`). Pour une action **sans instance**
+(créer une tâche), l'équipe ne peut pas se déduire d'un objet qui n'existe pas encore : le
+projet parent est passé explicitement, `$this->authorize('create', [Task::class, $project])`.
+
+### Fuite de données inter-équipes trouvée en testant avec une deuxième équipe réelle
+
+Jusqu'ici, une seule équipe existait jamais en pratique (le seed du Module 3), donc
+certains bugs de filtrage étaient invisibles. Premier test avec un vrai deuxième compte
+(inscription libre, sa propre équipe personnelle) : son tableau de bord affichait les
+« Top contributeurs » et l'« Activité récente » de l'équipe d'Alice, pas les siens.
+
+Cause : `Project` a le scope global `TeamScope` (Module 4), donc `Project::with(...)->get()`
+dans `DashboardController` était déjà correctement filtré. Mais `Activity` (pas de
+colonne `team_id`) et la requête `User::withCount(...)` (aucun filtre du tout) ne
+l'étaient pas — invisible avec une seule équipe en base, car « toutes les équipes » et
+« mon équipe » désignaient alors le même ensemble de lignes. Corrigé en filtrant
+explicitement par l'équipe courante :
+
+```php
+Activity::whereHasMorph('subject', [Task::class], fn ($q) =>
+    $q->whereHas('project', fn ($q2) => $q2->where('team_id', $teamId))
+)
+User::whereHas('teams', fn ($q) => $q->where('teams.id', $teamId))->withCount([...])
+```
+
+Leçon générale : un scope global sur *un* modèle ne protège pas les requêtes qui
+interrogent *d'autres* modèles, même liés. Chaque requête d'un contrôleur doit être
+vérifiée individuellement, pas supposée protégée « parce qu'il y a un scope quelque part ».
+
+### Invitations par URL signée
+
+`URL::temporarySignedRoute()` génère un lien à durée de vie limitée dont la signature
+couvre tous les paramètres de la requête (équipe, e-mail, rôle) :
+
+```php
+$signedUrl = URL::temporarySignedRoute('teams.invitations.accept', now()->addDays(7), [
+    'team' => $team->id, 'email' => $email, 'role' => $role,
+]);
+```
+
+Le middleware `signed` sur la route rejette (403, « Invalid signature ») toute URL dont un
+seul de ces paramètres a été modifié après génération — **vérifié réellement** en
+modifiant `role=member` en `role=owner` dans un lien avant de cliquer dessus : rejeté.
+Ce que `signed` ne vérifie **pas** : que la personne qui clique est bien la destinataire.
+Ajouté à la main dans le contrôleur : `abort_unless($request->user()->email === ..., 403, ...)`.
+Doc : https://laravel.com/docs/12.x/urls#signed-urls
+
+`TeamMemberController::store()` distingue les deux cas : e-mail déjà lié à un compte →
+ajout immédiat à la table pivot ; e-mail inconnu → e-mail d'invitation avec ce lien signé.
+`Illuminate\Contracts\Auth\MustVerifyEmail`, l'envoi passe par un `Mailable` volontairement
+minimal (`TeamInvitationMail`, vue Blade simple, ni Markdown ni `ShouldQueue`) — signalé
+explicitement : le Module 7 (e-mails et notifications) le reprendra pour le mettre en
+file d'attente et le passer au format Markdown ; ce n'est pas encore le sujet ici.
+
+### Rate limiting sur la connexion : déjà fourni par Breeze, pas réinventé
+
+`App\Http\Requests\Auth\LoginRequest::ensureIsNotRateLimited()` (généré par Breeze)
+limite déjà les tentatives à 5 par couple e-mail+IP (`RateLimiter::tooManyAttempts`),
+avec verrouillage progressif et message traduit (`lang/fr/auth.php['throttle']`). Choix
+assumé : ne **pas** ajouter de mécanisme personnalisé par-dessus — un second système de
+rate limiting ferait double emploi sans bénéfice réel, et irait à l'encontre de la
+consigne « lire le code généré avant d'écrire le sien ». Vérifié avec 6 échecs de connexion
+réels d'affilée sur le même compte :
+```
+tentative 6 -> "Trop de tentatives de connexion. Merci de réessayer dans 50 secondes."
+```
+
+### Sécurité : ce qui protège déjà, vérifié pour de vrai
+
+| Protection | Où | Vérifié comment |
+|---|---|---|
+| CSRF | Middleware `web` (par défaut sur toutes les routes de `routes/web.php`) | `POST /projects` sans jeton `_token` → **419** |
+| XSS | Échappement Blade `{{ }}` (jamais `{!! !!}` sur du contenu utilisateur) | Nom de projet `<script>window.__xss=true</script>` créé puis affiché : rendu en texte littéral (`&lt;script&gt;...`), rien exécuté |
+| Mass assignment | `$fillable` explicite sur chaque modèle (jamais `$guarded = []`) | Depuis le Module 3 : `team_id` sur `Project` n'est mass-assignable que parce qu'il est listé, et vient toujours du serveur (`CurrentTeam`), jamais du formulaire |
+| Verrouillage après échecs | `RateLimiter` de Breeze (voir ci-dessus) | 6 tentatives → blocage temporaire |
+
+### Vérification de bout en bout (navigateur réel, pas seulement `php artisan test`)
+
+Inscription → e-mail de vérification (driver `log`, lien signé extrait du log) → clic →
+tableau de bord ; déconnexion → `/projects` redirige vers `/login` ; deux comptes de deux
+équipes différentes ne voient jamais les projets/activités l'un de l'autre ; un compte
+hors équipe visitant l'URL d'un projet d'une autre équipe reçoit un **403** en français ;
+invitation d'un compte existant → ajout immédat (201) ; invitation d'une adresse inconnue →
+e-mail avec lien signé (202) puis rattachement effectif au clic. `php artisan test` reste
+vert (25 tests, dont les 15 générés par Breeze, tous lus avant d'être acceptés tels quels).
+
+---
