@@ -526,3 +526,253 @@ taille de la table. Ne pas se fier uniquement au chronomètre pour juger un inde
 plan d'exécution est plus fiable.
 
 ---
+
+## Module 4 — Eloquent, le cœur du framework
+
+### Toutes les relations, en un coup d'œil
+
+| Modèle | Relation | Type |
+|---|---|---|
+| `User` | `teams()` | `belongsToMany` (pivot `team_user`, `withPivot('role')`) |
+| `User` | `assignedTasks()`, `comments()`, `attachments()`, `activities()` | `hasMany` |
+| `Team` | `users()` | `belongsToMany` (inverse du pivot) |
+| `Team` | `projects()` | `hasMany` |
+| `Team` | `tasks()` | **`hasManyThrough`** (Team → Project → Task, sans relation intermédiaire chargée) |
+| `Project` | `team()` | `belongsTo` |
+| `Project` | `tasks()` | `hasMany` |
+| `Task` | `project()`, `assignee()`, `parent()` | `belongsTo` |
+| `Task` | `subtasks()` | `hasMany` (auto-référence sur `parent_id`) |
+| `Task` | `comments()`, `attachments()`, `activities()` | **`morphMany`** |
+| `Task` | `tags()` | **`morphToMany`** |
+| `Tag` | `tasks()` | **`morphedByMany`** (l'autre sens du `morphToMany`) |
+| `Comment`/`Attachment`/`Activity` | `commentable()`/`attachable()`/`subject()` | **`morphTo`** |
+
+Toutes vérifiées avec un script chargeant chaque relation et affichant un résultat réel
+(pas juste "ça compile") avant d'être considérées acquises.
+
+### `hasManyThrough` : `Team::tasks()`
+
+```php
+public function tasks(): HasManyThrough
+{
+    return $this->hasManyThrough(Task::class, Project::class);
+}
+```
+Traverse `Team → Project → Task` **en une seule requête SQL** (un `JOIN`), sans avoir à
+charger tous les projets d'abord puis boucler dessus pour récupérer leurs tâches. Vérifié :
+`$team->tasks()->count()` renvoie directement le total, un seul aller-retour base.
+
+### Enum PHP casté : `TaskStatus`
+
+```php
+enum TaskStatus: string
+{
+    case Todo = 'todo';
+    case InProgress = 'in_progress';
+    case Done = 'done';
+
+    public function label(): string { /* ... */ }
+    public function color(): string { /* ... */ }
+}
+
+// Task.php
+protected $casts = ['status' => TaskStatus::class, ...];
+```
+`$task->status` n'est plus une chaîne mais une vraie instance `TaskStatus` — impossible
+d'assigner une valeur hors de l'enum par erreur (`$task->status = 'archivé'` échouerait),
+et `$task->status->label()`/`->color()` centralisent l'affichage au lieu de le disperser
+dans chaque vue Blade avec des `match()` dupliqués.
+
+### Scopes : local vs global — la nuance vue en pratique
+
+- **Local** (`scopeForTeam`) : opt-in, explicite, utilisable n'importe quand —
+  `Project::forTeam($team)->get()`.
+- **Global** (`TeamScope`, classe implémentant `Scope`, enregistrée dans
+  `Project::booted()`) : s'applique **automatiquement** à toute requête sur `Project`,
+  sans rien écrire au point d'appel.
+
+Problème concret : un scope global « équipe courante » a besoin de savoir *quelle* équipe
+est courante — information qui, normalement, vient de l'utilisateur connecté (Module 6,
+pas encore fait). Solution : un petit service `CurrentTeam` (singleton dans le conteneur,
+vide par défaut) que le scope consulte ; tant que rien ne l'a rempli, le scope est un
+no-op et ne casse aucune requête existante. **Vérifié concrètement** avec deux équipes
+distinctes : `CurrentTeam` vide → tous les projets (5) ; rempli avec l'équipe A → 4
+projets (tous sauf celui de l'équipe B) ; rempli avec l'équipe B → 1 projet. Le Module 6
+n'aura qu'à appeler `app(CurrentTeam::class)->set($user->currentTeam)` sur chaque requête
+authentifiée — rien d'autre à changer ici.
+
+### Accessor moderne : `Task::isOverdue`
+
+```php
+protected function isOverdue(): Attribute
+{
+    return Attribute::make(
+        get: fn () => $this->due_date !== null
+            && $this->due_date->isPast()
+            && $this->status !== TaskStatus::Done,
+    );
+}
+```
+Méthode `isOverdue()` (camelCase) → accessible via `$task->is_overdue` (snake_case,
+conversion automatique de Laravel). Rien n'est stocké en base : recalculé à chaque accès
+à partir de `due_date` et `status`. Évite qu'un même calcul de « en retard » soit
+réécrit différemment dans plusieurs vues.
+
+### Cast personnalisé : `HexColor`
+
+```php
+class HexColor implements CastsAttributes
+{
+    public function get(Model $model, string $key, mixed $value, array $attributes): ?string { return $value; }
+    public function set(Model $model, string $key, mixed $value, array $attributes): ?string
+    {
+        return $value === null ? null : '#'.strtolower(ltrim(trim($value), '#'));
+    }
+}
+```
+Appliqué à `Project::color` et `Tag::color`. Vérifié : écrire `'FFAA00'` (sans `#`, en
+majuscules) stocke et relit `'#ffaa00'` — la normalisation se fait **à un seul endroit**
+plutôt que dans chaque formulaire qui écrit une couleur.
+
+### Soft deletes sur `Task`
+
+```php
+use SoftDeletes; // + migration $table->softDeletes()
+```
+`$task->delete()` ne supprime plus la ligne : il pose `deleted_at`. Conséquences
+vérifiées :
+- `Task::find($id)` → `null` après suppression (les soft-deleted sont exclus par défaut).
+- `Task::withTrashed()->find($id)` → la retrouve.
+- `->restore()` → réapparaît dans les requêtes normales.
+
+**Aucun changement nécessaire dans `TaskController::destroy()`** (toujours
+`$task->delete()`) — c'est tout l'intérêt du trait : le code appelant ne sait pas que le
+comportement a changé sous lui.
+
+### Observer : `TaskObserver`
+
+```php
+public function updating(Task $task): void
+{
+    if (! $task->isDirty('status')) return;
+    $task->completed_at = $task->status === TaskStatus::Done ? now() : null;
+}
+
+public function updated(Task $task): void
+{
+    if (! $task->wasChanged('status')) return;
+    Activity::create([...]); // journalise l'ancien et le nouveau statut
+}
+```
+`updating()` (avant l'écriture) modifie `completed_at` **dans la même requête UPDATE**
+que le changement de statut — pas de requête séparée. `updated()` (après l'écriture)
+journalise dans `activities`, avec l'ancien statut lu via `getOriginal('status')`.
+
+**Piège rencontré en vrai** : le `DemoSeeder` créait les tâches "terminées" directement
+via `Task::factory()->create(['status' => 'done'])` — un `INSERT`, pas un `UPDATE`, donc
+les événements `updating`/`updated` **ne se déclenchent jamais** (ce sont `creating`/
+`created` qui s'exécutent à la création, pas ceux-là). Corrigé : les tâches "terminées"
+du seed sont maintenant créées `todo`/`in_progress` puis **réellement transitionnées** via
+`$task->update(['status' => TaskStatus::Done])`, ce qui active l'observer pour de vrai —
+plus fidèle à ce qui se passera dans l'application réelle (un utilisateur qui déplace une
+carte kanban fait un `update()`, jamais un `create()` direct en "done").
+
+**Deuxième piège, plus sournois** : même après cette correction, `completed_at` restait
+`null`. Cause : `DatabaseSeeder` avait `use WithoutModelEvents;` — un trait généré par
+défaut par Laravel qui désactive **tous** les événements de modèle pendant tout le
+seeding (pensé pour accélérer la création en masse via les factories). Sauf qu'il
+désactivait aussi l'observer qu'on voulait voir se déclencher. Retiré, avec un
+commentaire expliquant pourquoi, pour que personne ne le remette « par habitude ».
+
+### Exercice 1 — Dashboard et chasse aux N+1
+
+Page `/dashboard` : liste des projets avec leurs tâches et l'assigné de chaque tâche,
+plus un flux d'activité récente. Mesuré en appelant directement le contrôleur et en
+comptant les requêtes via `DB::listen()`/`getQueryLog()` (isole le coût des données,
+sans le bruit des requêtes de session/cache d'une vraie requête HTTP — Debugbar, lui,
+recompte tout, voir plus bas) :
+
+| Version | Requêtes SQL | Temps mesuré |
+|---|---|---|
+| Naïve (`Project::all()`, aucun eager loading) | 42 | 238,48 ms |
+| Optimisée (`Project::with('tasks.assignee')`) | 6 | 43,75 ms |
+
+Soit **7× moins de requêtes** et **~5,5× plus rapide** en temps réel mesuré sur ce jeu de
+données (le programme du module visait « 10× » à titre indicatif — l'écart réel dépend
+du volume de données ; avec plus de projets/tâches, le fossé entre N+1 et eager loading
+se creuse encore, puisque la version naïve grandit linéairement avec N alors que la
+version optimisée reste à un nombre de requêtes constant).
+
+**Nuance Debugbar vs mesure isolée** : en visitant `/dashboard` dans un vrai navigateur,
+Debugbar affiche 12 requêtes (pas 6) — parce qu'une vraie requête HTTP traverse aussi la
+session (`SESSION_DRIVER=database`), le cache, Telescope... Ce sont de vraies requêtes,
+mais constantes, indépendantes du nombre de projets/tâches — donc hors sujet pour évaluer
+un N+1. D'où la mesure isolée ci-dessus pour juger spécifiquement l'effet de
+l'eager loading.
+
+### Exercice 2 — Top 5 utilisateurs, tâches terminées ce mois, en une requête
+
+```php
+User::query()
+    ->withCount(['assignedTasks as completed_this_month' => function ($query) {
+        $query->where('status', TaskStatus::Done)
+            ->whereBetween('completed_at', [now()->startOfMonth(), now()->endOfMonth()]);
+    }])
+    ->orderByDesc('completed_this_month')
+    ->limit(5)
+    ->get();
+```
+`withCount` avec une closure de contrainte génère un **sous-select corrélé** dans la
+requête principale (`(select count(*) from tasks where users.id = tasks.assignee_id and
+...) as completed_this_month`) — vérifié : **1 seule requête** dans le log SQL, pas une
+requête de comptage par utilisateur.
+
+### Exercice 3 — `foreach` + accumulateur → pipeline de Collections
+
+```php
+// Avant
+$counts = [];
+foreach ($projects as $project) {
+    foreach ($project->tasks as $task) {
+        $status = $task->status->value;
+        $counts[$status] ??= 0;
+        $counts[$status]++;
+    }
+}
+
+// Après
+$counts = $projects
+    ->flatMap(fn (Project $project) => $project->tasks)
+    ->groupBy(fn (Task $task) => $task->status->value)
+    ->map(fn ($tasks) => $tasks->count());
+```
+Vérifié : les deux versions produisent exactement le même résultat sur le même jeu de
+données (`{"done":12,"in_progress":10,"todo":10}`). Aucune requête SQL supplémentaire —
+les collections sont déjà en mémoire (chargées par le dashboard), tout se passe en PHP.
+La version pipeline gagne surtout en lisibilité : chaque étape (aplatir, grouper, compter)
+est nommée, alors que la version `foreach` mélange itération et accumulation dans la même
+boucle.
+
+**Piège Larastan rencontré** : `flatMap` puis `groupBy` avec des closures typées
+(`fn (Task $task) => ...`) faisait échouer l'analyse statique — Larastan perd le type
+précis des éléments à travers `flatMap` (il le voit comme `Model` générique, pas `Task`).
+Corrigé avec une annotation `@var Collection<int, Task>` sur la variable intermédiaire :
+pas pour cacher une erreur réelle, juste pour donner à l'analyseur une information qu'il
+ne peut pas déduire seul à travers ce enchaînement précis.
+
+### Page kanban — validation module 4 (≤ 5 requêtes SQL)
+
+`GET /projects/{project}/board` (bouton « Vue kanban » sur la page projet, pas seulement
+une route tapée à la main) : colonnes À faire / En cours / Terminée, tâches groupées en
+mémoire via `->groupBy()` (même technique que l'exercice 3). Mesuré directement :
+
+```
+1. select * from projects limit 1                                    (résolution {project})
+2. select * from tasks where project_id = ? and deleted_at is null   (tâches du projet)
+3. select * from users where id in (...)                             (assignés, eager load)
+```
+**3 requêtes**, et ce nombre ne dépend structurellement pas du nombre de tâches : aucune
+des trois requêtes n'est exécutée dans une boucle, seule la liste de valeurs du `in (...)`
+grandit avec le nombre d'assignés distincts — jamais le nombre de requêtes lui-même.
+
+---
