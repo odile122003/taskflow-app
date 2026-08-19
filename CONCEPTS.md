@@ -267,3 +267,105 @@ C'est exactement ce qu'un navigateur fait tout seul avec un vrai formulaire cont
 `@csrf` — la manip manuelle ici sert uniquement à vérifier les routes sans interface.
 
 ---
+
+## Module 2 — Blade et les vues
+
+### Layout en composant (`<x-layout>`) plutôt que `@extends`/`@section`
+
+Blade propose deux façons de factoriser un squelette de page commun :
+
+- **Classique** — une vue `layouts/app.blade.php` avec `@yield('content')`, et chaque page
+  fait `@extends('layouts.app')` puis `@section('content') ... @endsection`.
+- **Composants** (choisi pour TaskFlow) — `resources/views/components/layout.blade.php`
+  est un composant Blade normal ; chaque page l'utilise comme une balise HTML :
+  `<x-layout title="...">...contenu...</x-layout>`, et le contenu passé entre les balises
+  devient `{{ $slot }}` à l'intérieur du composant.
+
+Les deux font la même chose ; la syntaxe composant a été retenue ici parce que c'est la
+même mécanique que les autres composants du projet (`<x-card>`, `<x-badge>`...) — un seul
+concept à retenir (les composants) plutôt que deux.
+
+### `@props` et l'`$attributes` bag
+
+Chaque composant anonyme (`resources/views/components/*.blade.php`) déclare en première
+ligne les variables qu'il attend, avec des valeurs par défaut :
+```php
+@props(['status' => 'default'])
+```
+Toute autre valeur passée à la balise (`class="mb-4"`, `id="..."`) qui n'est **pas**
+listée dans `@props` atterrit automatiquement dans `$attributes` — un objet qu'on fusionne
+sur l'élément racine avec `$attributes->merge([...])`. C'est ce qui permet d'écrire
+`<x-card class="mb-4">` depuis l'extérieur et de voir cette classe s'ajouter (pas
+remplacer) aux classes internes du composant (`rounded-lg border ...`).
+
+### Slots nommés
+
+`<x-modal>` a deux zones de contenu distinctes : le déclencheur (bouton qui ouvre la
+modale) et le corps de la modale. Un slot nommé permet de les distinguer :
+```blade
+{{-- Dans le composant modal.blade.php --}}
+@isset($trigger)
+    <span @click="open = true">{{ $trigger }}</span>
+@endisset
+...
+{{ $slot }}  {{-- le contenu "par défaut", non nommé --}}
+```
+```blade
+{{-- À l'usage --}}
+<x-modal>
+    <x-slot:trigger>
+        <x-button variant="secondary">Aperçu</x-button>
+    </x-slot:trigger>
+
+    <h3>...</h3>  {{-- ceci va dans $slot --}}
+</x-modal>
+```
+
+### `@forelse` et `$loop`
+
+`projects/index.blade.php` utilise `@forelse ($projects as $project) ... @empty ... @endforelse`
+— une seule directive qui gère à la fois la boucle **et** l'état vide, sans `if (count(...) === 0)`
+séparé. À l'intérieur de la boucle, Blade injecte automatiquement une variable `$loop`
+(`$loop->iteration`, `$loop->count`, `$loop->first`, `$loop->last`...) — utilisée ici pour
+afficher « Projet 2 / 3 » sans avoir à calculer d'index manuellement.
+
+### Un modal interactif = du JS, donc Alpine.js
+
+Un `<x-modal>` qui s'ouvre/se ferme est de l'**état côté client** (ouvert ou fermé) — Blade
+seul ne peut pas faire ça, il ne s'exécute que côté serveur. D'où l'ajout d'**Alpine.js**
+(pas prévu avant le Module 13 dans la table des dépendances, mais listé comme outil de
+base dans `CLAUDE.md` §3.5 sans module associé — décision explicite pour ce composant) :
+```blade
+<div x-data="{ open: false }" @keydown.escape.window="open = false">
+    <span @click="open = true">{{ $trigger }}</span>
+    <div x-show="open" x-cloak>{{ $slot }}</div>
+</div>
+```
+`x-data` déclare un petit état réactif local (`open`) ; `x-show` bascule `display:none` ;
+`@click`/`@keydown` réagissent aux événements ; `@click.outside` (utilisé sur le panneau
+interne) ferme la modale si on clique en dehors.
+
+### Piège rencontré en vrai : `x-cloak` mal placé casse toute la page
+
+Première tentative : `x-cloak` posé sur `<body>` dans le layout, dans l'idée d'éviter un
+flash de contenu avant qu'Alpine soit prêt. Résultat en testant dans un vrai navigateur
+(Playwright, capture d'écran) : **la page entière restait invisible** (`display: none`)
+— `x-cloak` n'a été retiré par Alpine que sur les éléments réellement gérés par `x-show`/
+`x-data`, pas de façon garantie sur un `<body>` sans rapport direct avec un composant
+Alpine. Correction : `x-cloak` retiré de `<body>`, conservé uniquement sur la `<div x-show="open">`
+du modal, où il a un rôle réel (éviter un flash de la modale ouverte avant qu'Alpine
+l'ait basculée en fermée). **Ce bug n'était pas visible en lisant le code — seul le test
+dans un navigateur (capture d'écran) l'a révélé.** Exactement la raison pour laquelle
+`CLAUDE.md` interdit de considérer un changement front comme terminé sans l'avoir vu
+tourner réellement.
+
+### Vérification effectuée
+
+Serveur de dev lancé, 3 projets de test créés (actif, archivé, sans tâche), page
+`/projects` capturée : cartes, badges colorés (vert = actif, gris = archivé), compteur
+`$loop`. Modale ouverte par clic sur « Aperçu », capturée, refermée par `Échap`, re-capturée
+pour prouver qu'elle disparaît bien. Page `/projects/{slug}` capturée avec tâches
+(badges de statut todo/in_progress/done) et sans tâche (état vide « Aucune tâche pour ce
+projet. »). Aucune erreur console JS.
+
+---
