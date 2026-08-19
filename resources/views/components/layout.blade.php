@@ -13,6 +13,10 @@
             <a href="{{ route('projects.index') }}" class="text-lg font-semibold text-slate-900">
                 TaskFlow
             </a>
+
+            <a href="{{ route('dashboard') }}" class="text-sm text-slate-600 hover:text-slate-900">
+                Tableau de bord
+            </a>
         </nav>
     </header>
 
