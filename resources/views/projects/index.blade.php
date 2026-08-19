@@ -1,6 +1,7 @@
 <x-layout title="Projets — TaskFlow">
     <div class="mb-6 flex items-center justify-between">
         <h1 class="text-2xl font-bold text-slate-900">Projets</h1>
+        <x-button :href="route('projects.create')">Nouveau projet</x-button>
     </div>
 
     <div class="space-y-4">
