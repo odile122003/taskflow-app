@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\DataTransferObjects\CreateTaskData;
+use App\Http\Requests\StoreTaskRequest;
+use App\Http\Requests\UpdateTaskRequest;
 use App\Models\Project;
 use App\Models\Task;
-use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
 
@@ -30,22 +32,27 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function create(Project $project)
     {
-        abort(501, 'Formulaire de création à implémenter au Module 2 (Blade)');
+        abort(501, 'Formulaire de création à implémenter au Module 13 (front interactif)');
     }
 
     /**
      * Store a newly created resource in storage.
      */
-    public function store(Request $request, Project $project)
+    public function store(StoreTaskRequest $request, Project $project)
     {
-        $data = $request->validate([
-            'title' => ['required', 'string', 'max:255'],
-            'status' => ['sometimes', 'string', 'max:50'],
+        $data = CreateTaskData::fromArray($request->validated());
+
+        /** @var Task $task */
+        $task = $project->tasks()->create([
+            'title' => $data->title,
+            'priority' => $data->priority ?? 'normal',
+            'due_date' => $data->dueDate,
+            'assignee_id' => $data->assigneeId,
         ]);
 
-        $task = $project->tasks()->create($data);
+        $task->tags()->sync($data->tagIds);
 
-        return response()->json($task, 201);
+        return response()->json($task->load('tags'), 201);
     }
 
     /**
@@ -65,22 +72,23 @@ class TaskController extends Controller implements HasMiddleware
      */
     public function edit(Project $project, Task $task)
     {
-        abort(501, 'Formulaire d\'édition à implémenter au Module 2 (Blade)');
+        abort(501, 'Formulaire d\'édition à implémenter au Module 13 (front interactif)');
     }
 
     /**
      * Update the specified resource in storage.
      */
-    public function update(Request $request, Project $project, Task $task)
+    public function update(UpdateTaskRequest $request, Project $project, Task $task)
     {
-        $data = $request->validate([
-            'title' => ['sometimes', 'string', 'max:255'],
-            'status' => ['sometimes', 'string', 'max:50'],
-        ]);
+        $validated = $request->validated();
 
-        $task->update($data);
+        $task->update($validated);
 
-        return $task;
+        if (array_key_exists('tags', $validated)) {
+            $task->tags()->sync($validated['tags']);
+        }
+
+        return $task->fresh('tags');
     }
 
     /**
