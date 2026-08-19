@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Enums\TaskStatus;
 use App\Models\Activity;
 use App\Models\Attachment;
 use App\Models\Comment;
@@ -61,7 +62,6 @@ class DemoSeeder extends Seeder
                 ->sequence(
                     ['status' => 'todo'],
                     ['status' => 'in_progress'],
-                    ['status' => 'done'],
                 )
                 ->create();
 
@@ -83,6 +83,16 @@ class DemoSeeder extends Seeder
                     'subject_type' => Task::class,
                     'subject_id' => $task->id,
                     'description' => 'a changé le statut de la tâche « '.$task->title.' »',
+                ]);
+            }
+
+            // Quelques tâches réellement terminées via update() (pas create()) : ça
+            // déclenche TaskObserver, qui renseigne completed_at automatiquement —
+            // nécessaire pour l'exercice « tâches terminées ce mois » (module 4).
+            foreach ($tasks->random(min(3, $tasks->count())) as $task) {
+                $task->update([
+                    'assignee_id' => $task->assignee_id ?? $memberIds->random(),
+                    'status' => TaskStatus::Done,
                 ]);
             }
 
