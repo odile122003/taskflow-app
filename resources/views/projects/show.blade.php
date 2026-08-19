@@ -9,8 +9,9 @@
         </div>
     </div>
 
-    <div class="mb-4">
+    <div class="mb-4 flex gap-3">
         <x-button :href="route('projects.board', $project)" variant="secondary">Vue kanban</x-button>
+        <x-button :href="route('projects.edit', $project)" variant="secondary">Modifier</x-button>
     </div>
 
     <h2 class="mb-3 text-lg font-semibold text-slate-900">Tâches</h2>

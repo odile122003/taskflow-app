@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StoreProjectRequest;
+use App\Http\Requests\UpdateProjectRequest;
 use App\Models\Project;
 use App\Models\Task;
-use Illuminate\Http\Request;
+use App\Models\Team;
+use App\Support\CurrentTeam;
 use Illuminate\Support\Collection;
 
 class ProjectController extends Controller
@@ -24,23 +27,24 @@ class ProjectController extends Controller
      */
     public function create()
     {
-        // Formulaire HTML : implémenté au Module 2 (Blade). Pas de vue pour l'instant.
-        abort(501, 'Formulaire de création à implémenter au Module 2 (Blade)');
+        return view('projects.create');
     }
 
     /**
      * Store a newly created resource in storage.
      */
-    public function store(Request $request)
+    public function store(StoreProjectRequest $request)
     {
-        $data = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'slug' => ['required', 'string', 'max:255', 'unique:projects,slug'],
-        ]);
+        // Pas d'authentification avant le Module 6 : le nouveau projet est
+        // rattaché provisoirement à l'équipe courante du contexte (vide pour
+        // l'instant, voir CurrentTeam) ou, à défaut, à la première équipe
+        // existante. Le Module 6 remplacera ceci par l'équipe réelle de
+        // l'utilisateur connecté — team_id ne viendra jamais du formulaire.
+        $teamId = app(CurrentTeam::class)->id() ?? Team::query()->value('id');
 
-        $project = Project::create($data);
+        $project = Project::create([...$request->validated(), 'team_id' => $teamId]);
 
-        return response()->json($project, 201);
+        return redirect()->route('projects.show', $project)->with('success', 'Projet créé.');
     }
 
     /**
@@ -78,22 +82,17 @@ class ProjectController extends Controller
      */
     public function edit(Project $project)
     {
-        abort(501, 'Formulaire d\'édition à implémenter au Module 2 (Blade)');
+        return view('projects.edit', ['project' => $project]);
     }
 
     /**
      * Update the specified resource in storage.
      */
-    public function update(Request $request, Project $project)
+    public function update(UpdateProjectRequest $request, Project $project)
     {
-        $data = $request->validate([
-            'name' => ['sometimes', 'string', 'max:255'],
-            'is_archived' => ['sometimes', 'boolean'],
-        ]);
+        $project->update($request->validated());
 
-        $project->update($data);
-
-        return $project;
+        return redirect()->route('projects.show', $project)->with('success', 'Projet mis à jour.');
     }
 
     /**
@@ -103,6 +102,6 @@ class ProjectController extends Controller
     {
         $project->delete();
 
-        return response()->noContent();
+        return redirect()->route('projects.index')->with('success', 'Projet supprimé.');
     }
 }
