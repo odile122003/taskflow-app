@@ -12,7 +12,9 @@ class ProjectController extends Controller
      */
     public function index()
     {
-        return Project::query()->latest()->get();
+        return view('projects.index', [
+            'projects' => Project::query()->latest()->get(),
+        ]);
     }
 
     /**
@@ -44,7 +46,9 @@ class ProjectController extends Controller
      */
     public function show(Project $project)
     {
-        return $project->load('tasks');
+        return view('projects.show', [
+            'project' => $project->load('tasks'),
+        ]);
     }
 
     /**
