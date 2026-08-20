@@ -84,6 +84,9 @@ class Task extends Model
         return $this->morphMany(Comment::class, 'commentable');
     }
 
+    /**
+     * @return MorphMany<Attachment, $this>
+     */
     public function attachments(): MorphMany
     {
         return $this->morphMany(Attachment::class, 'attachable');

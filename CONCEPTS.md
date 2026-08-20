@@ -996,6 +996,192 @@ ci-dessus). `php artisan test` reste vert (25 tests), `pint`/`phpstan` verts.
 
 ---
 
+## Module 8 — Files d'attente, jobs, planification, événements
+
+### Redis / Horizon : sciemment mis de côté
+
+Ni l'extension PHP `redis` ni un serveur Redis ne sont installés sur cette machine.
+Horizon (supervision des queues) est **spécifique à Redis** — impossible à faire tourner
+sans lui. Décision : rester sur `QUEUE_CONNECTION=database` (déjà en place depuis le
+départ) pour tout le module — jobs, chaînes, batches, échecs/rejeu fonctionnent
+identiquement quel que soit le driver, seule la supervision avancée (tableau de bord
+Horizon) change. Documenté plutôt qu'installé à moitié.
+
+### `GenerateThumbnail` : un job réel, idempotent
+
+```php
+class GenerateThumbnail implements ShouldQueue
+{
+    public int $tries = 3;
+    public int $timeout = 30;
+
+    public function __construct(public int $attachmentId) {}
+
+    public function handle(): void
+    {
+        $attachment = Attachment::find($this->attachmentId);
+        if ($attachment === null || $attachment->thumbnail_path !== null) {
+            return; // déjà fait, ou plus rien à faire
+        }
+        // ... génère la miniature (intervention/image, driver GD)
+    }
+}
+```
+`$this->attachmentId` (un entier), jamais `$this->attachment` (le modèle) : un job est
+sérialisé et stocké tel quel dans la table `jobs`, potentiellement pour un moment avant
+qu'un worker le reprenne — un modèle complet gonflerait la charge utile inutilement, et
+ses données pourraient être périmées d'ici l'exécution.
+
+**Piège d'environnement réel** : ni GD ni Imagick n'étaient activés (`php -m` muet sur
+les deux). `extension=gd` décommenté dans `php.ini` (même geste que `zip` au Module 0),
+vérifié avec une vraie image PNG générée par GD, uploadée, transformée en miniature de
+300px de large — fichier physiquement plus petit sur disque, chemin enregistré en base.
+
+**Idempotence vérifiée, pas seulement affirmée** : rejouer le job sur la même pièce
+jointe (déjà traitée) retourne en ~100 ms au lieu de ~250 ms — preuve que le
+retraitement de l'image est bien sauté, pas recalculé silencieusement en double.
+
+### Échec réel, `failed_jobs`, puis `queue:retry`
+
+Fichier stocké volontairement corrompu (octets non-image), job redispatché. Le paramètre
+`--tries` de `queue:work` **ne l'emporte pas** sur la propriété `$tries` du job lui-même
+— avec `$tries = 3` sur `GenerateThumbnail`, il a fallu 3 tentatives réelles (forcées en
+remettant `available_at` à `now()` entre chacune, plutôt que d'attendre le délai de
+nouvelle tentative) avant que Laravel ne le bascule dans `failed_jobs`. Fichier réparé,
+`php artisan queue:retry <uuid>` (repris de `queue:failed`), rejoué avec succès :
+`thumbnail_path` correctement renseigné à la fin. Le cycle complet — échec, stockage de
+l'échec, correction, rejeu, succès — a été vérifié de bout en bout, pas juste la
+commande `queue:retry` isolément.
+
+### Batch : import CSV de tâches avec suivi de progression
+
+```php
+$jobs = collect($rows)->map(fn (array $row) => new ImportTaskRow($project->id, $row));
+$batch = Bus::batch($jobs)->name("Import CSV — {$project->name}")->dispatch();
+// -> $batch->id renvoyé au client, qui interroge GET /imports/{batch} pour suivre
+```
+Chaque ligne du CSV = un job indépendant (`ImportTaskRow`) : une ligne invalide (testé
+avec un titre vide) échoue **seule**, sans faire échouer les autres. Vérifié avec un CSV
+de 5 lignes (4 valides, 1 invalide) traité une ligne à la fois : progression 20 % → 40 %
+→ 60 % → 80 %, puis `failed=1` sur la dernière — `$batch->finished()` devient `true`
+malgré l'échec partiel, et exactement 4 tâches ont été créées (pas 5, pas 0).
+`ImportTaskRow` utilise aussi `firstOrCreate` par titre : idempotent, un rejeu du batch
+ne duplique pas les lignes déjà importées avec succès.
+
+### `TaskMoved` : événement + listener en file d'attente
+
+Jusqu'ici, `TaskObserver::updated()` écrivait directement dans `activities`. Refactorisé
+en événement de domaine explicite :
+```php
+// TaskObserver::updated()
+event(new TaskMoved($task, $from, $task->status));
+```
+`LogTaskMovedActivity implements ShouldQueue` écoute cet événement et journalise
+— **découvert automatiquement** par convention (voir le piège du Module 6 sur le double
+enregistrement : celui-ci n'est PAS ré-enregistré à la main). Différence avec l'Observer
+(Module 4) : l'Observer reste pour ce qui est intrinsèquement lié à la persistance
+(`completed_at`, mis à jour *avant* l'écriture, dans la même requête SQL) ; l'événement
+sert pour les réactions métier découplées, qui peuvent être multiples et indépendantes
+(journalisation **et** diffusion temps réel, voir plus bas — deux jobs distincts déposés
+par un seul `event()`).
+
+**Vérifié pour de vrai** : un changement de statut dépose 2 jobs (`jobs` passe de 0 à 2 :
+le listener + la diffusion automatique de `ShouldBroadcast`), la table `activities` ne
+change qu'**après** `queue:work` — la journalisation n'est plus synchrone.
+
+### Planificateur — rapport hebdomadaire
+
+```php
+// routes/console.php
+Schedule::command('taskflow:send-weekly-report')->mondays()->at('08:00')->withoutOverlapping();
+```
+`withoutOverlapping()` : si l'envoi d'un lundi prenait plus d'une minute (le scheduler
+est réévalué chaque minute via `schedule:work` ou une entrée cron), on ne veut jamais
+deux exécutions simultanées qui enverraient le rapport en double.
+Doc : https://laravel.com/docs/12.x/scheduling#preventing-task-overlaps
+
+`SendWeeklyReport` calcule de vraies statistiques par équipe (tâches terminées cette
+semaine, projets actifs, meilleur contributeur — mêmes requêtes que le tableau de bord
+du Module 4/6, filtrées par équipe) et envoie `WeeklyReportMail` (Markdown,
+`ShouldQueue`) aux Owner/Admin de chaque équipe. Exécuté manuellement pour vérifier
+(`php artisan taskflow:send-weekly-report`, hors calendrier) : barre de progression
+réelle, 2 e-mails mis en file (un par destinataire), contenu vérifié dans le log —
+« Tâches terminées cette semaine : 13 », etc., pas des valeurs inventées.
+
+### Commande Artisan `taskflow:cleanup-archived`
+
+Pour lui donner un sens réel, un projet archivé mémorise désormais *depuis quand*
+(`archived_at`, jamais dans `$fillable` — positionné uniquement par un hook
+`static::updating()` dans `Project::booted()`, pour qu'aucun client ne puisse l'falsifier
+afin d'échapper au nettoyage) :
+```php
+protected static function booted(): void
+{
+    static::updating(function (Project $project) {
+        if ($project->isDirty('is_archived')) {
+            $project->archived_at = $project->is_archived ? now() : null;
+        }
+    });
+}
+```
+```
+php artisan taskflow:cleanup-archived --days=90 [--force]
+```
+Affiche d'abord un tableau (`$this->table()`) des projets concernés, demande confirmation
+sauf `--force`, supprime avec une barre de progression. La suppression du projet suffit à
+faire disparaître ses tâches : `tasks.project_id` a `cascadeOnDelete()` depuis le
+Module 3. **Vérifié réellement** : projet antidaté à 120 jours d'archivage, commande
+lancée sans `--force` (tableau affiché, annulation par défaut confirmée), puis avec
+`--force` — projet et ses 12 tâches bien absents de la base après coup.
+
+### Broadcasting temps réel — Reverb + Echo
+
+`php artisan install:broadcasting --reverb` : génère `config/broadcasting.php`,
+`config/reverb.php`, `routes/channels.php`, `resources/js/echo.js`, installe
+`laravel-echo`/`pusher-js` côté npm, ajoute les clés `REVERB_*` à `.env`
+(`BROADCAST_CONNECTION=reverb`).
+
+`TaskMoved implements ShouldBroadcast` (déjà écrit pour l'événement ci-dessus) diffuse
+sur un **canal privé** scopé au projet :
+```php
+public function broadcastOn(): array
+{
+    return [new PrivateChannel('projects.'.$this->task->project_id)];
+}
+```
+Autorisation dans `routes/channels.php` — un canal privé exige un callback qui décide qui
+a le droit d'écouter, comme une Policy :
+```php
+Broadcast::channel('projects.{projectId}', function (User $user, int $projectId) {
+    $project = Project::withoutGlobalScope(TeamScope::class)->find($projectId);
+    return $project !== null && $user->roleIn($project->team) !== null;
+});
+```
+Côté navigateur, `resources/js/echo.js` (généré) expose `window.Echo` globalement ; le
+kanban s'y abonne (`window.Echo.private('projects.'+id).listen('.task.moved', ...)`) et
+réagit à l'événement — pas de glisser-déposer pour l'instant (le vrai kanban interactif
+est le sujet du Module 13), juste deux boutons « déplacer » suffisants pour prouver le
+temps réel avec le minimum de surface ajoutée.
+
+**Vérifié avec deux navigateurs réellement ouverts en parallèle**, pas en lisant la
+doc : Alice et Bob, connectés chacun avec leur propre session, sur le même tableau
+kanban. Alice clique « En cours → » sur une tâche. **Sans aucune action de Bob**, sa
+page affiche la bannière « Une tâche vient d'être déplacée — actualisation… » et se
+recharge d'elle-même moins de deux secondes plus tard. Chaîne complète empruntée pour de
+vrai : requête HTTP d'Alice → `TaskObserver` → `event(TaskMoved)` → job de diffusion
+automatique en file → `queue:work` (worker lancé pour le test) → serveur Reverb
+(`php artisan reverb:start`, lancé pour le test) → canal privé authentifié
+(`POST /broadcasting/auth`, visible dans les requêtes de la page de Bob) → `Echo` →
+rechargement.
+
+### Validation du module
+
+Aucune action lente ne bloque une réponse HTTP : miniatures, imports CSV, e-mails et
+diffusion temps réel partent tous en file d'attente. `php artisan test` reste vert
+(25 tests), `pint`/`phpstan` verts.
+
+---
+
 ### Breeze : ce qu'il génère, et le piège de l'installation sur un projet existant
 
 `composer require laravel/breeze --dev` puis `php artisan breeze:install blade` génèrent :

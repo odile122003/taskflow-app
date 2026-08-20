@@ -6,6 +6,7 @@ use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\TaskController;
+use App\Http\Controllers\TaskImportController;
 use App\Http\Controllers\TeamMemberController;
 use Illuminate\Support\Facades\Route;
 
@@ -24,6 +25,9 @@ Route::middleware(['auth', 'verified', 'team.current'])->group(function () {
         ->name('tasks.attachments.download');
     Route::delete('projects/{project}/tasks/{task}/attachments/{attachment}', [AttachmentController::class, 'destroy'])
         ->name('tasks.attachments.destroy');
+
+    Route::post('projects/{project}/tasks/import', [TaskImportController::class, 'store'])->name('tasks.import.store');
+    Route::get('imports/{batch}', [TaskImportController::class, 'show'])->name('imports.show');
 
     Route::post('teams/{team}/members', [TeamMemberController::class, 'store'])->name('teams.members.store');
     Route::get('teams/{team}/invitations/accept', [TeamMemberController::class, 'acceptInvitation'])
