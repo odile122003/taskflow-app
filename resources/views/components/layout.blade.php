@@ -20,6 +20,15 @@
                     <a href="{{ route('dashboard') }}" class="text-sm text-slate-600 hover:text-slate-900">
                         Tableau de bord
                     </a>
+                    <a href="{{ route('notifications.index') }}" class="flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900">
+                        Notifications
+                        @php $unread = auth()->user()->unreadNotifications()->count(); @endphp
+                        @if ($unread > 0)
+                            <span class="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-indigo-600 px-1.5 py-0.5 text-xs font-medium text-white">
+                                {{ $unread }}
+                            </span>
+                        @endif
+                    </a>
                     <a href="{{ route('profile.edit') }}" class="text-sm text-slate-600 hover:text-slate-900">
                         {{ auth()->user()->name }}
                     </a>
