@@ -16,6 +16,7 @@ class Attachment extends Model
         'attachable_type',
         'attachable_id',
         'path',
+        'thumbnail_path',
         'original_name',
         'size',
         'mime_type',

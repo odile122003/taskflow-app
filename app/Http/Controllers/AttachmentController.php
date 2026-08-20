@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreAttachmentRequest;
+use App\Jobs\GenerateThumbnail;
 use App\Models\Attachment;
 use App\Models\Project;
 use App\Models\Task;
@@ -32,6 +33,12 @@ class AttachmentController extends Controller
             'size' => $file->getSize(),
             'mime_type' => $file->getMimeType(),
         ]);
+
+        // La génération de miniature ne bloque jamais la réponse : redimensionner
+        // une image est un travail CPU non négligeable, exécuté en tâche de fond.
+        if (str_starts_with($attachment->mime_type, 'image/')) {
+            GenerateThumbnail::dispatch($attachment->id);
+        }
 
         return response()->json($attachment, 201);
     }
