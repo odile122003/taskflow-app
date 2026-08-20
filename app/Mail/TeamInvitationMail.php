@@ -4,16 +4,19 @@ namespace App\Mail;
 
 use App\Models\Team;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Mail\Mailable;
+use Illuminate\Mail\Mailables\Content;
+use Illuminate\Mail\Mailables\Envelope;
 use Illuminate\Queue\SerializesModels;
 
 /**
- * Mailable volontairement minimal (vue Blade simple, pas de Markdown, pas de
- * ShouldQueue) : le Module 6 se concentre sur l'URL signée elle-même. Le
- * Module 7 (e-mails et notifications) reprendra ce Mailable pour le mettre
- * en file d'attente et le passer au format Markdown.
+ * ShouldQueue : l'envoi part sur la file d'attente (table jobs, driver
+ * QUEUE_CONNECTION=database) au lieu de bloquer la requête HTTP qui a
+ * déclenché l'invitation. Un worker (php artisan queue:work) doit tourner
+ * pour que le mail parte réellement — approfondi au Module 8.
  */
-class TeamInvitationMail extends Mailable
+class TeamInvitationMail extends Mailable implements ShouldQueue
 {
     use Queueable, SerializesModels;
 
@@ -22,10 +25,17 @@ class TeamInvitationMail extends Mailable
         public string $signedUrl,
     ) {}
 
-    public function build(): self
+    public function envelope(): Envelope
     {
-        return $this
-            ->subject("Invitation à rejoindre l'équipe {$this->team->name} sur TaskFlow")
-            ->view('emails.team-invitation');
+        return new Envelope(
+            subject: "Invitation à rejoindre l'équipe {$this->team->name} sur TaskFlow",
+        );
+    }
+
+    public function content(): Content
+    {
+        return new Content(
+            markdown: 'emails.team-invitation',
+        );
     }
 }
