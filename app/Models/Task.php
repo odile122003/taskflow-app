@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\TaskStatus;
+use App\Models\Scopes\TeamScope;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -44,6 +45,25 @@ class Task extends Model
         return $this->belongsTo(Project::class);
     }
 
+    /**
+     * Même relation, mais sans le scope global TeamScope de Project. Réservée
+     * aux policies : elles s'exécutent après que le middleware SetCurrentTeam
+     * a positionné l'équipe *courante*, donc un `$task->project` scopé sur
+     * une tâche d'une AUTRE équipe renverrait `null` (au lieu du vrai projet)
+     * — un crash au lieu d'un refus propre. L'autorisation doit toujours voir
+     * le véritable projet propriétaire, jamais un projet filtré par le
+     * contexte de la personne qui demande l'accès.
+     *
+     * @return BelongsTo<Project, $this>
+     */
+    public function projectForAuthorization(): BelongsTo
+    {
+        return $this->belongsTo(Project::class, 'project_id')->withoutGlobalScope(TeamScope::class);
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
     public function assignee(): BelongsTo
     {
         return $this->belongsTo(User::class, 'assignee_id');
