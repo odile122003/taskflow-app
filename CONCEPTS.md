@@ -890,7 +890,111 @@ invisible : `php artisan test` ne le couvrait pas, et lire le code ne le révèl
 
 ---
 
-## Module 6 — Authentification, autorisation, sécurité
+## Module 7 — Fichiers, e-mails, notifications
+
+### `Storage` : un disque abstrait, jamais le disque en dur
+
+`Storage::disk()` (sans argument = le disque par défaut, `FILESYSTEM_DISK`) ou
+`$file->store('attachments/'.$task->id)` : aucune méthode de `AttachmentController`
+ne nomme `local` ou `s3`. C'est ce qui permet de changer `.env` sans changer le code.
+Doc : https://laravel.com/docs/12.x/filesystem#configuration
+
+**Vérifié pour de vrai, pas seulement lu** : upload + téléchargement d'une pièce jointe
+avec `FILESYSTEM_DISK=local`, puis `FILESYSTEM_DISK=public` (pas de vraies clés AWS en
+local — même principe, seul le driver change) : même code, même comportement, le fichier
+atterrit simplement à un autre endroit sur disque (`storage/app/private/...` puis
+`storage/app/public/...`).
+
+**Décision consciente** : les pièces jointes ne sont **pas** servies par une URL publique
+directe (ce que permettrait le disque `public` + son lien symbolique). Elles passent par
+`AttachmentController::download()` → `Storage::download()`, protégé par
+`$this->authorize('view', $task)`. Sinon, n'importe qui avec le lien pourrait télécharger
+le fichier d'une équipe à laquelle il n'appartient pas — tout le travail des policies du
+Module 6 serait contourné par une simple URL statique.
+
+### Piège réel : une policy qui plante au lieu de refuser
+
+Premier test avec un compte hors équipe qui tente de télécharger une pièce jointe d'une
+tâche d'une autre équipe : **500**, pas 403. Cause : `TaskPolicy` faisait
+`$task->project->team` — mais `$task->project` est un accès relationnel **paresseux**,
+donc une vraie requête Eloquent, donc **filtrée par le scope global `TeamScope`** de
+`Project` (Module 4). Le middleware `SetCurrentTeam` (Module 6) a déjà positionné
+l'équipe *courante* de la personne qui demande l'accès à ce moment de l'exécution : pour
+une tâche d'une équipe différente, `$task->project` renvoie donc `null` — pas le vrai
+projet, un projet absent — et `null->team` explose.
+
+Piège subtil car **le scope censé protéger empêche justement de constater qu'il faut
+refuser l'accès**. Corrigé avec une relation dédiée, réservée aux policies :
+```php
+public function projectForAuthorization(): BelongsTo
+{
+    return $this->belongsTo(Project::class, 'project_id')->withoutGlobalScope(TeamScope::class);
+}
+```
+Leçon générale : une policy doit toujours voir la vraie donnée, jamais une donnée
+pré-filtrée par le contexte de la personne qui demande l'accès — sinon la vérification
+elle-même devient invisible à ses propres yeux.
+
+### Mailable Markdown + `ShouldQueue`
+
+`TeamInvitationMail` (minimal depuis le Module 6, comme annoncé) devient un vrai Mailable
+Markdown avec `envelope()`/`content()` plutôt que l'ancien `build()`, et implémente
+`ShouldQueue` :
+```php
+public function content(): Content
+{
+    return new Content(markdown: 'emails.team-invitation');
+}
+```
+La vue `emails/team-invitation.blade.php` utilise les composants `<x-mail::message>` /
+`<x-mail::button>` : un seul fichier Blade génère à la fois la version HTML stylée et la
+version texte brut envoyées ensemble dans le même e-mail (vérifié dans le log : les deux
+parties MIME sont bien présentes).
+Doc : https://laravel.com/docs/12.x/mail#markdown-mailables
+
+**`ShouldQueue` vérifié pour de vrai**, pas supposé : après avoir déclenché une invitation,
+`DB::table('jobs')->count()` passe à 1 **avant** que quoi que ce soit apparaisse dans le
+log — l'e-mail n'est pas encore parti, juste mis en file. Après
+`php artisan queue:work --once`, le job disparaît de `jobs` et l'e-mail apparaît dans le
+log. Sans `queue:work` qui tourne, l'invitation ne partirait jamais : point d'attention
+pour la mise en production (approfondi au Module 8, superviseur de queue).
+
+### Notifications : un seul message, plusieurs canaux
+
+`TaskAssignedNotification` (`via()` retourne `['mail', 'database']`) illustre la
+différence avec un Mailable : la même classe produit `toMail()` (un e-mail) **et**
+`toArray()` (une ligne dans la table `notifications`, déjà migrée depuis le Module 3).
+Doc : https://laravel.com/docs/12.x/notifications#creating-notifications
+
+**Choix assumé et documenté dans le code** : contrairement à `TeamInvitationMail`, cette
+notification n'implémente **pas** `ShouldQueue`. Le canal `database` alimente le compteur
+de non-lus affiché dans la navigation à chaque page — la mettre en file d'attente
+retarderait ce compteur tant qu'aucun worker ne tourne, ce qui casserait la démonstration
+du centre de notifications. `TeamInvitationMail` reste la démonstration de référence de
+l'envoi en file d'attente ; les deux approches (synchrone / en file) existent pour de
+bonnes raisons différentes, ni l'une ni l'autre n'est « la bonne façon » dans l'absolu.
+
+Déclenchée depuis `TaskObserver` (déjà là depuis le Module 4), sur deux événements
+distincts : `created()` (une tâche qui naît déjà assignée) et `updated()` avec
+`wasChanged('assignee_id')` (réassignation). Testé avec un changement d'assigné réel :
+ligne créée dans `notifications` (`read_at` à `null`), e-mail présent dans le log
+immédiatement (pas de délai, cohérent avec l'absence de `ShouldQueue`).
+
+### Centre de notifications
+
+`auth()->user()->unreadNotifications` (méthode fournie par le trait `Notifiable`, déjà
+sur `User` depuis Breeze) compte les notifications non lues — affiché en badge dans la
+navigation sur chaque page. Page `/notifications` : liste paginée, bouton individuel
+« Marquer comme lu » (`DatabaseNotification::markAsRead()`) et bouton global « Tout
+marquer comme lu ». Vérifié dans un vrai navigateur : badge « 1 » après assignation,
+disparaît après clic sur « Marquer comme lu ».
+
+### Validation du module
+
+`FILESYSTEM_DISK=local` → `public` sans toucher un seul fichier applicatif (vérifié
+ci-dessus). `php artisan test` reste vert (25 tests), `pint`/`phpstan` verts.
+
+---
 
 ### Breeze : ce qu'il génère, et le piège de l'installation sur un projet existant
 
