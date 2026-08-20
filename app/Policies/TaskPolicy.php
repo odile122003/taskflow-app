@@ -12,11 +12,17 @@ class TaskPolicy
 {
     /**
      * Owner : accès complet aux tâches de son équipe, quelle que soit
-     * l'action. $arg est une Task (view/update/delete) ou un Project
-     * (create, passé explicitement par le contrôleur), jamais les deux.
+     * l'action — mais seulement si le jeton (le cas échéant) a l'ability
+     * requise. Un jeton en lecture seule reste bloqué même pour un Owner.
      */
-    public function before(User $user, string $ability, mixed $arg = null): ?bool
+    public function before(User $user, string $ability, mixed $arg = null): Response|bool|null
     {
+        $required = in_array($ability, ['view', 'viewAny'], true) ? 'tasks:read' : 'tasks:write';
+
+        if (! $user->tokenCan($required)) {
+            return Response::deny("Ce jeton n'a pas la permission « {$required} ».");
+        }
+
         $team = match (true) {
             $arg instanceof Task => $arg->projectForAuthorization->team,
             $arg instanceof Project => $arg->team,

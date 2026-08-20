@@ -11,6 +11,10 @@
         </x-card>
 
         <x-card>
+            @include('profile.partials.api-tokens')
+        </x-card>
+
+        <x-card>
             @include('profile.partials.delete-user-form')
         </x-card>
     </div>

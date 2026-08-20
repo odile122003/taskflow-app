@@ -1182,6 +1182,166 @@ diffusion temps réel partent tous en file d'attente. `php artisan test` reste v
 
 ---
 
+## Module 9 — API REST et Sanctum
+
+### Sanctum : un guard de plus, pas un système à part
+
+`php artisan install:api` crée `routes/api.php`, la table `personal_access_tokens`, et
+demande d'ajouter `HasApiTokens` sur `User`. Le guard `sanctum` vérifie un en-tête
+`Authorization: Bearer …` ; le guard `web` (Module 6) continue de vérifier la session.
+Les **mêmes** `ProjectPolicy`/`TaskPolicy` protègent les deux — l'autorisation ne dépend
+jamais de la façon dont on s'est authentifié, seulement de qui on est et de ce qu'on a le
+droit de faire.
+Doc : https://laravel.com/docs/12.x/sanctum#issuing-api-tokens
+
+### Versionnement et structure
+
+`routes/api.php` groupe tout sous `Route::prefix('v1')->name('api.v1.')`, et les
+contrôleurs vivent dans `App\Http\Controllers\Api\V1\*` (namespace séparé des
+contrôleurs web, mêmes noms de classe sans collision). Versionner dès la v1 évite de
+devoir retrofit un préfixe `/v2` en urgence le jour où un breaking change devient
+nécessaire — le coût de la discipline est nul tant qu'il n'y a qu'une version.
+
+### API Resources : `whenLoaded`, `whenCounted`, liens
+
+```php
+'tasks_count' => $this->whenCounted('tasks'),      // absent si pas de withCount('tasks')
+'assignee' => new UserResource($this->whenLoaded('assignee')),  // absent si pas de with('assignee')
+'links' => ['self' => route('api.v1.projects.show', $this->resource)],
+```
+Une Resource ne déclenche **jamais** de requête elle-même : `whenLoaded`/`whenCounted`
+rendent visible, au niveau du contrôleur, la nécessité d'un `with()`/`withCount()`
+explicite — la Resource se contente d'omettre la clé si la relation n'a pas été chargée,
+plutôt que de la charger en douce (qui recréerait un N+1, cette fois caché dans la
+couche de sérialisation plutôt que dans le contrôleur).
+Doc : https://laravel.com/docs/12.x/eloquent-resources#conditional-relationships
+
+Pagination : `ProjectResource::collection($query->paginate())` sur un `LengthAwarePaginator`
+produit automatiquement `data`/`links`/`meta` — vérifié dans une vraie réponse HTTP, avec
+les libellés de pagination déjà traduits en français depuis le Module 5 (« Précédent »,
+« Suivant »), sans rien reconfigurer pour l'API.
+
+### Piège réel : un bug caché depuis le Module 5, révélé par la Resource
+
+`TaskController::store()` (web **et** API) créait une tâche sans jamais renseigner
+`status` explicitement, comptant sur le `DEFAULT 'todo'` de la colonne (Module 3). Ça
+fonctionnait en apparence : la ligne SQL avait bien `status = 'todo'`. Mais le **modèle
+Eloquent en mémoire**, juste après `create()`, n'a jamais relu cette valeur — `$task->status`
+valait `null` jusqu'au prochain rechargement depuis la base. Le contrôleur web ne l'a
+jamais remarqué : `response()->json($task, 201)` sérialise un enum casté à `null` en
+`"status": null` sans erreur. `TaskResource::toArray()`, elle, fait
+`$this->status->value` explicitement — et plante en accédant à une propriété sur `null`.
+
+**La Resource n'a pas introduit le bug, elle l'a rendu visible.** Corrigé en renseignant
+`'status' => TaskStatus::Todo->value` explicitement à la création, dans les deux
+contrôleurs. Leçon : ne jamais compter sur un défaut posé côté base de données pour une
+valeur que le code applicatif lit dans la même requête — soit le relire (`fresh()`), soit
+(mieux ici) l'écrire explicitement des deux côtés.
+
+### Filtres et tri : à la main, puis `spatie/laravel-query-builder`
+
+Version manuelle (`?filter[status]=done&filter[tag]=urgent&sort=-due_date`), une
+condition par champ :
+```php
+if ($status = $request->input('filter.status')) { $query->where('status', $status); }
+if ($tag = $request->input('filter.tag')) { $query->whereHas('tags', fn ($q) => $q->where('slug', $tag)); }
+// ... pareil pour le tri, avec une liste blanche in_array() à la main
+```
+Douleur ressentie : chaque champ filtrable/triable se copie-colle, et rien n'empêche
+d'oublier la liste blanche pour un nouveau champ (donc d'exposer une colonne par erreur).
+Remplacé par :
+```php
+QueryBuilder::for($project->tasks()->with(['assignee', 'tags']))
+    ->allowedFilters(['status', AllowedFilter::callback('tag', fn ($q, $v) => $q->whereHas('tags', fn ($q2) => $q2->where('slug', $v)))])
+    ->allowedSorts(['due_date', 'priority', 'created_at'])
+    ->defaultSort('-created_at')
+    ->paginate();
+```
+**Bénéfice concret, pas seulement moins de lignes** : un tri sur un champ non autorisé
+(`?sort=not_a_real_column`) renvoie **400** avec le paquet — la version manuelle
+l'ignorait silencieusement (aucune erreur, juste un tri qui ne se produit pas). Vérifié
+avec le même client réel avant/après le remplacement : comportement identique sur les cas
+valides, rejet explicite sur les cas invalides.
+Doc : https://spatie.be/docs/laravel-query-builder
+
+### Abilities de token : la même Policy protège web et API
+
+Une *ability* est attachée au **jeton**, pas à l'utilisateur : `$user->tokenCan('tasks:write')`.
+Ajoutée dans `before()` de chaque policy, **avant** le court-circuit Owner — sinon le
+bypass Owner rendrait les abilities inutiles pour ce rôle :
+```php
+public function before(User $user, string $ability, mixed $arg = null): Response|bool|null
+{
+    $required = in_array($ability, ['view', 'viewAny'], true) ? 'tasks:read' : 'tasks:write';
+    if (! $user->tokenCan($required)) {
+        return Response::deny("Ce jeton n'a pas la permission « {$required} ».");
+    }
+    // ... logique de rôle existante, inchangée
+}
+```
+Point clé de Sanctum : `tokenCan()` renvoie **toujours** `true` pour une authentification
+par session (web) — les abilities ne concernent que les vrais jetons, aucun changement de
+comportement pour l'interface web. Vérifié avec un jeton créé volontairement en lecture
+seule (`projects:read` uniquement) : `POST /api/v1/projects` → **403**, message français,
+alors que le même compte via la session web peut créer un projet sans restriction.
+
+Gestion des jetons : page profil (`profile/partials/api-tokens.blade.php`), jeton en
+clair affiché **une seule fois** à la création (Sanctum ne stocke qu'un hash — impossible
+de le retrouver après coup, comme un mot de passe).
+
+### Rate limiting par jeton, pas par utilisateur
+
+```php
+RateLimiter::for('api', function (Request $request) {
+    $user = $request->user();
+    $key = $user !== null ? $user->currentAccessToken()->id : $request->ip();
+    return Limit::perMinute(60)->by((string) $key);
+});
+```
+Par **jeton** plutôt que par utilisateur : un script d'import et une appli mobile du même
+compte ne doivent pas se gêner, chacun a son propre compteur — sinon un client mal
+codé qui boucle épuiserait aussi le quota de l'autre.
+Doc : https://laravel.com/docs/12.x/routing#rate-limiting
+
+### Format d'erreur homogène — un vrai problème trouvé en testant
+
+Une 422 (validation) rendait déjà proprement `{"message": "...", "errors": {...}}` par
+défaut. Mais une **404** réelle (`GET /api/v1/projects/n-existe-pas`) renvoyait la trace
+de débogage complète — chemins de fichiers du serveur, stack trace entière — parce que
+`APP_DEBUG=true` en local. Incohérent avec la 422, et une vraie fuite d'information si ça
+partait tel quel en production avec le debug activé par erreur. Corrigé dans
+`bootstrap/app.php` via `$exceptions->render()`, scopé à `/api/*` uniquement (les pages
+web gardent leur page de debug habituelle) :
+```php
+$exceptions->render(function (Throwable $e, Request $request) {
+    if (! $request->is('api/*')) return null;
+    $status = match (true) { /* Authentication->401, Authorization->403, NotFound->404, Validation->422, ... */ };
+    $message = $status < 500 || config('app.debug') ? $e->getMessage() : 'Une erreur interne est survenue.';
+    return response()->json(['message' => $message, ...], $status);
+});
+```
+**Vérifié pour les quatre cas** avec de vraies requêtes : 401 (pas de jeton), 403 (jeton
+sans l'ability), 404 (ressource absente), 422 (validation) — même forme `{"message": ...}`
+partout, jamais de trace de débogage sur `/api/*`.
+
+### Tests d'API avec `assertJsonStructure`
+
+`tests/Feature/Api/{Project,Task,Comment}ApiTest.php`, `Sanctum::actingAs($user, $abilities)`
+(pas de vrai jeton à générer en test — Sanctum fournit ce helper spécifiquement pour ça).
+Cas couverts : isolation par équipe, validation, création réussie avec structure JSON
+exacte, refus d'un jeton en lecture seule, refus d'un rôle Invité, suppression réservée à
+Owner, filtre/tri (dont le rejet d'un champ non autorisé). 15 tests, tous verts.
+
+### Validation du module
+
+Parcours complet mené **entièrement en HTTP brut** (`Invoke-RestMethod` + jeton Bearer,
+sans navigateur ni interface web) : créer un projet, créer une tâche, poster un
+commentaire, changer le statut, filtrer par statut, supprimer la tâche puis le projet —
+chaque étape vérifiée avec la vraie réponse JSON avant de passer à la suivante.
+`php artisan test` : 40 tests verts, `pint`/`phpstan` verts.
+
+---
+
 ### Breeze : ce qu'il génère, et le piège de l'installation sur un projet existant
 
 `composer require laravel/breeze --dev` puis `php artisan breeze:install blade` génèrent :

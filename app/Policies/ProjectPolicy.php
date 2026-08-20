@@ -11,14 +11,25 @@ use Illuminate\Auth\Access\Response;
 class ProjectPolicy
 {
     /**
-     * Le ou la propriétaire d'une équipe peut toujours tout faire sur les
-     * projets de cette équipe. Retourner `null` (et non `false`) laisse les
-     * autres méthodes décider normalement pour tous les autres cas — y
-     * compris quand $arg est la chaîne de classe (viewAny/create) plutôt
-     * qu'une instance de Project.
+     * Vérifié ici, avant tout le reste : un jeton d'API sans l'ability
+     * requise doit être refusé même pour le ou la Owner — sinon le bypass
+     * juste en dessous rendrait les abilities inutiles pour ce rôle.
+     * `tokenCan()` renvoie toujours `true` pour une authentification par
+     * session (web) : les abilities ne concernent que les vrais jetons.
      */
-    public function before(User $user, string $ability, mixed $arg = null): ?bool
+    public function before(User $user, string $ability, mixed $arg = null): Response|bool|null
     {
+        $required = in_array($ability, ['view', 'viewAny'], true) ? 'projects:read' : 'projects:write';
+
+        if (! $user->tokenCan($required)) {
+            return Response::deny("Ce jeton n'a pas la permission « {$required} ».");
+        }
+
+        // Le ou la propriétaire d'une équipe peut toujours tout faire sur les
+        // projets de cette équipe. Retourner `null` (et non `false`) laisse les
+        // autres méthodes décider normalement pour tous les autres cas — y
+        // compris quand $arg est la chaîne de classe (viewAny/create) plutôt
+        // qu'une instance de Project.
         if ($arg instanceof Project && $user->roleIn($arg->team) === TeamRole::Owner) {
             return true;
         }
