@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\DataTransferObjects\CreateTaskData;
+use App\Enums\TaskStatus;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Models\Project;
@@ -49,6 +50,11 @@ class TaskController extends Controller implements HasMiddleware
         /** @var Task $task */
         $task = $project->tasks()->create([
             'title' => $data->title,
+            // Explicite plutôt que de compter sur le DEFAULT 'todo' de la
+            // colonne (Module 3) : sans ça, le modèle en mémoire garde
+            // status = null juste après create() jusqu'au prochain rechargement
+            // depuis la base — l'enum caché plante au premier ->value lu.
+            'status' => TaskStatus::Todo->value,
             'priority' => $data->priority ?? 'normal',
             'due_date' => $data->dueDate,
             'assignee_id' => $data->assigneeId,
