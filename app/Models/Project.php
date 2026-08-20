@@ -20,6 +20,7 @@ class Project extends Model
         'is_archived' => 'boolean',
         'is_favorite' => 'boolean',
         'color' => HexColor::class,
+        'archived_at' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -27,6 +28,17 @@ class Project extends Model
         // Scope global : n'agit que si un CurrentTeam a été positionné (voir
         // AppServiceProvider). Sans ça, no-op — on ne casse rien avant le Module 6.
         static::addGlobalScope(new TeamScope);
+
+        // archived_at n'est jamais dans $fillable : géré uniquement ici, jamais
+        // depuis un formulaire — sinon rien n'empêcherait un client d'envoyer
+        // une date arbitraire pour échapper au nettoyage automatique (Module 8).
+        static::updating(function (Project $project) {
+            if (! $project->isDirty('is_archived')) {
+                return;
+            }
+
+            $project->archived_at = $project->is_archived ? now() : null;
+        });
     }
 
     public function getRouteKeyName(): string
