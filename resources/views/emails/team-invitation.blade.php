@@ -1,12 +1,17 @@
-<p>Bonjour,</p>
+<x-mail::message>
+# Invitation à rejoindre {{ $team->name }}
 
-<p>Vous avez été invité(e) à rejoindre l'équipe <strong>{{ $team->name }}</strong> sur TaskFlow.</p>
+Vous avez été invité(e) à rejoindre l'équipe **{{ $team->name }}** sur TaskFlow.
 
-<p>
-    <a href="{{ $signedUrl }}">Accepter l'invitation</a>
-</p>
+<x-mail::button :url="$signedUrl">
+Accepter l'invitation
+</x-mail::button>
 
-<p>Ce lien est valable 7 jours. Si vous n'avez pas encore de compte, connectez-vous ou inscrivez-vous
-avec cette même adresse e-mail, puis cliquez de nouveau sur ce lien.</p>
+Ce lien est valable 7 jours. Si vous n'avez pas encore de compte, connectez-vous ou
+inscrivez-vous avec cette même adresse e-mail, puis cliquez de nouveau sur ce lien.
 
-<p>Si vous ne connaissez pas cette équipe, vous pouvez ignorer cet e-mail.</p>
+Si vous ne connaissez pas cette équipe, vous pouvez ignorer cet e-mail sans risque.
+
+Merci,<br>
+{{ config('app.name') }}
+</x-mail::message>

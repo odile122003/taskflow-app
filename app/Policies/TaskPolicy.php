@@ -18,7 +18,7 @@ class TaskPolicy
     public function before(User $user, string $ability, mixed $arg = null): ?bool
     {
         $team = match (true) {
-            $arg instanceof Task => $arg->project->team,
+            $arg instanceof Task => $arg->projectForAuthorization->team,
             $arg instanceof Project => $arg->team,
             default => null,
         };
@@ -37,7 +37,7 @@ class TaskPolicy
 
     public function view(User $user, Task $task): Response
     {
-        return $user->roleIn($task->project->team) !== null
+        return $user->roleIn($task->projectForAuthorization->team) !== null
             ? Response::allow()
             : Response::deny("Vous n'êtes pas membre de l'équipe propriétaire de cette tâche.");
     }
@@ -58,14 +58,14 @@ class TaskPolicy
     public function update(User $user, Task $task): Response
     {
         // Un invité (Guest) peut voir les tâches mais jamais les modifier.
-        return in_array($user->roleIn($task->project->team), [TeamRole::Owner, TeamRole::Admin, TeamRole::Member], true)
+        return in_array($user->roleIn($task->projectForAuthorization->team), [TeamRole::Owner, TeamRole::Admin, TeamRole::Member], true)
             ? Response::allow()
             : Response::deny('Les invités ne peuvent pas modifier de tâche.');
     }
 
     public function delete(User $user, Task $task): Response
     {
-        return in_array($user->roleIn($task->project->team), [TeamRole::Owner, TeamRole::Admin], true)
+        return in_array($user->roleIn($task->projectForAuthorization->team), [TeamRole::Owner, TeamRole::Admin], true)
             ? Response::allow()
             : Response::deny('Seuls le ou la propriétaire et les administrateurs peuvent supprimer une tâche.');
     }
