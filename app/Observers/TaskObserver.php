@@ -3,7 +3,7 @@
 namespace App\Observers;
 
 use App\Enums\TaskStatus;
-use App\Models\Activity;
+use App\Events\TaskMoved;
 use App\Models\Task;
 use App\Notifications\TaskAssignedNotification;
 
@@ -33,14 +33,19 @@ class TaskObserver
     }
 
     /**
-     * Après l'écriture : journalise le changement de statut, et notifie le
-     * nouvel assigné en cas de réassignation. Les deux sont indépendants —
-     * une même requête peut changer l'un, l'autre, ou les deux à la fois.
+     * Après l'écriture : signale le changement de statut au reste de
+     * l'application via un événement (journalisation + diffusion temps réel,
+     * Module 8 — voir TaskMoved), et notifie le nouvel assigné en cas de
+     * réassignation. Les deux sont indépendants — une même requête peut
+     * changer l'un, l'autre, ou les deux à la fois.
      */
     public function updated(Task $task): void
     {
         if ($task->wasChanged('status')) {
-            $this->logStatusChange($task);
+            $original = $task->getOriginal('status');
+            $from = $original instanceof TaskStatus ? $original : TaskStatus::from($original);
+
+            event(new TaskMoved($task, $from, $task->status));
         }
 
         if ($task->wasChanged('assignee_id')) {
@@ -51,27 +56,5 @@ class TaskObserver
     private function notifyAssignee(Task $task): void
     {
         $task->assignee?->notify(new TaskAssignedNotification($task));
-    }
-
-    private function logStatusChange(Task $task): void
-    {
-        $original = $task->getOriginal('status');
-        $from = $original instanceof TaskStatus ? $original : TaskStatus::from($original);
-
-        Activity::create([
-            'causer_id' => $task->assignee_id,
-            'subject_type' => Task::class,
-            'subject_id' => $task->id,
-            'description' => sprintf(
-                'a changé le statut de « %s » : %s → %s',
-                $task->title,
-                $from->label(),
-                $task->status->label(),
-            ),
-            'properties' => [
-                'from' => $from->value,
-                'to' => $task->status->value,
-            ],
-        ]);
     }
 }
