@@ -13,6 +13,9 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
+/**
+ * @property-read bool $is_overdue
+ */
 class Task extends Model
 {
     use HasFactory, SoftDeletes;
