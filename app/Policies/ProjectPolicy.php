@@ -5,23 +5,35 @@ namespace App\Policies;
 use App\Enums\TeamRole;
 use App\Models\Project;
 use App\Models\User;
+use App\Policies\Concerns\ChecksTokenAbility;
 use App\Support\CurrentTeam;
 use Illuminate\Auth\Access\Response;
 
 class ProjectPolicy
 {
+    use ChecksTokenAbility;
+
     /**
      * Vérifié ici, avant tout le reste : un jeton d'API sans l'ability
      * requise doit être refusé même pour le ou la Owner — sinon le bypass
      * juste en dessous rendrait les abilities inutiles pour ce rôle.
-     * `tokenCan()` renvoie toujours `true` pour une authentification par
-     * session (web) : les abilities ne concernent que les vrais jetons.
+     *
+     * Piège réel (trouvé en écrivant les tests de policies web, Module 10) :
+     * `tokenCan()` ne renvoie PAS toujours `true` pour une session — cette
+     * garantie ne vaut que si l'authentification passe par le guard
+     * `sanctum` lui-même (mode SPA à cookie, avec un TransientToken). Nos
+     * routes web utilisent le guard `web` classique : `currentAccessToken()`
+     * y est toujours `null`, donc `tokenCan()` valait toujours `false` —
+     * **toute l'interface web était bloquée** depuis son introduction, sans
+     * que personne ne s'en aperçoive avant un vrai test de session web.
+     * D'où la vérification explicite (voir ChecksTokenAbility) : la
+     * restriction ne s'applique que lorsqu'un vrai jeton est en jeu.
      */
     public function before(User $user, string $ability, mixed $arg = null): Response|bool|null
     {
         $required = in_array($ability, ['view', 'viewAny'], true) ? 'projects:read' : 'projects:write';
 
-        if (! $user->tokenCan($required)) {
+        if ($this->hasAccessToken($user) && ! $user->tokenCan($required)) {
             return Response::deny("Ce jeton n'a pas la permission « {$required} ».");
         }
 
