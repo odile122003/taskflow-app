@@ -5,6 +5,7 @@ namespace App\Observers;
 use App\Enums\TaskStatus;
 use App\Events\TaskMoved;
 use App\Models\Task;
+use App\Models\User;
 use App\Notifications\TaskAssignedNotification;
 
 class TaskObserver
@@ -53,8 +54,21 @@ class TaskObserver
         }
     }
 
+    /**
+     * User::find() plutôt que $task->assignee : la relation assignee() peut
+     * déjà être en cache sur cette instance depuis un accès antérieur
+     * (ex. created() la charge une première fois) — après une réassignation,
+     * $task->assignee renverrait alors encore l'ancien assigné, pas le
+     * nouveau. Bug réel trouvé en testant une réassignation avec
+     * Notification::fake() : la notification partait vers la mauvaise
+     * personne.
+     */
     private function notifyAssignee(Task $task): void
     {
-        $task->assignee?->notify(new TaskAssignedNotification($task));
+        if ($task->assignee_id === null) {
+            return;
+        }
+
+        User::find($task->assignee_id)?->notify(new TaskAssignedNotification($task));
     }
 }
