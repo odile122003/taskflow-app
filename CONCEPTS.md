@@ -1342,6 +1342,137 @@ chaque étape vérifiée avec la vraie réponse JSON avant de passer à la suiva
 
 ---
 
+## Module 10 — Tests
+
+### Couverture de code : sciemment mise de côté
+
+Ni Xdebug ni PCOV (les deux seules extensions capables de mesurer la couverture) ne sont
+installés sur cette machine — contrairement à `gd`/`zip`/`intervention-image`, ce ne sont
+pas des extensions déjà présentes mais désactivées : il aurait fallu télécharger un
+binaire externe. Décision : écrire une suite large et rigoureuse (le vrai objectif du
+module) sans le pourcentage chiffré, documenté comme limite d'environnement plutôt que
+comme raccourci silencieux.
+
+### Pest installé, coexiste avec les tests PHPUnit existants
+
+`composer require pestphp/pest pestphp/pest-plugin-laravel --dev` puis
+`./vendor/bin/pest --init` (pas `php artisan pest:install`, qui n'existe pas — c'est
+`pest --init` qui scaffold `tests/Pest.php`). Les tests Breeze/API des Modules 6-9,
+écrits en classes PHPUnit (`class XTest extends TestCase`), continuent de tourner
+**sans modification** aux côtés des nouveaux tests Pest (fonctions `it()`/`test()`) —
+Pest exécute nativement les deux styles dans la même suite. Choix assumé : ne pas
+convertir l'existant (travail mécanique à faible valeur), mais écrire tout le nouveau
+code de ce module en Pest, conformément à la convention du projet (`CLAUDE.md`).
+Doc : https://pestphp.com/docs/underlying-test-case
+
+`tests/Pest.php` centralise `RefreshDatabase` pour tous les tests Feature/Unit, et une
+fonction utilitaire globale `memberOf(Team $team, TeamRole $role)` — répétée dans
+suffisamment de fichiers pour justifier une factorisation à un seul endroit.
+
+### Deux vrais bugs trouvés en écrivant les tests, aucun des deux dans le code testé en premier lieu
+
+**1. Notification envoyée au mauvais assigné après une réassignation.** `TaskObserver::
+notifyAssignee()` faisait `$task->assignee?->notify(...)`. Un test avec
+`Notification::fake()` — créer une tâche assignée à Alice, la réassigner à Bob, vérifier
+que **Bob** est notifié — échouait : la notification ne partait ni vers Bob, ni (comme on
+aurait pu le croire) vers personne, mais restait accrochée à Alice. Cause : `created()`
+accède déjà à `$task->assignee` (pour notifier Alice à la création), ce qui **met la
+relation Eloquent en cache** sur cette instance. `update(['assignee_id' => $bob->id])`
+change l'attribut, mais ne rafraîchit jamais une relation déjà chargée — `$task->assignee`
+renvoie ensuite Alice indéfiniment sur cette même instance. Corrigé en interrogeant
+`User::find($task->assignee_id)` directement dans l'Observer, qui contourne le cache de
+relation. Leçon générale : une relation BelongsTo lue une fois reste figée sur cette
+instance même après un changement de la clé étrangère sous-jacente — vrai dès qu'un
+modèle est créé puis modifié dans le **même** cycle de requête.
+
+**2. Toute l'interface web bloquée depuis le Module 9, jamais remarqué.** `ProjectPolicy`/
+`TaskPolicy::before()` vérifiaient `$user->tokenCan($required)` en supposant (documenté à
+tort dans le Module 9) que cette méthode renvoie toujours `true` pour une session web.
+Faux : cette garantie ne vaut que si l'authentification passe par le guard `sanctum`
+lui-même (mode SPA à cookie, avec un `TransientToken`). Nos routes web utilisent le guard
+`web` classique — `currentAccessToken()` y est toujours `null`, donc `tokenCan()` valait
+toujours `false`, et **before() refusait chaque page** depuis son introduction. Invisible
+jusqu'ici car toute la vérification du Module 9 passait par l'API (jetons réels ou
+`Sanctum::actingAs()`), jamais par une vraie session web — le premier test Pest écrit
+avec `actingAs()` (pas `Sanctum::actingAs()`) l'a révélé immédiatement. Corrigé en ne
+vérifiant l'ability que si un jeton est réellement en jeu (`$user->currentAccessToken()`)
+— avec un piège Larastan au passage : cette méthode Sanctum est documentée
+`@var TToken` (sans `|null`), donc jamais nulle aux yeux de l'analyse statique, qui
+déclarait mort tout contrôle de nullité direct alors que le bug prouvait le contraire.
+Résolu avec un passage par un paramètre `mixed` (`ChecksTokenAbility::isNotNull()`) —
+pas un contournement : `mixed` est le type honnête de cette valeur, c'est le docblock de
+Sanctum qui se trompe.
+
+**Leçon commune aux deux** : ce sont exactement les régressions que Module 10 existe
+pour attraper — invisibles en lisant le code, invisibles même en le testant *seulement*
+via l'API ou seulement à la création, révélées uniquement par un test qui rejoue le
+scénario complet (créer **puis** modifier ; session web **et** jeton API).
+
+### Un vrai gap de validation trouvé via un dataset Pest
+
+```php
+it('accepts every valid priority value', function (string $priority) { ... })
+    ->with(['low', 'normal', 'high']);
+```
+En écrivant un test symétrique (« refuse d'assigner quelqu'un d'une autre équipe »),
+découverte que rien ne l'empêchait : `assignee_id` n'était validé qu'avec
+`exists:users,id` (n'importe quel utilisateur de la base). Corrigé avec
+`Rule::exists('team_user', 'user_id')->where('team_id', $project->team_id)` dans
+`StoreTaskRequest` **et** `UpdateTaskRequest`.
+
+### Mocking : `Storage::fake()`, `Mail::fake()`, `Queue::fake()`, `Bus::fake()`
+
+Chacun isole une couche précise, jamais la logique métier :
+- `Storage::fake()` : upload réel vers un disque en mémoire, `Storage::assertExists()`/
+  `assertMissing()` — aucun fichier n'atteint jamais le vrai disque en test.
+- `Queue::fake()` + `Queue::assertPushed(GenerateThumbnail::class, ...)` : vérifie qu'un
+  job **a été déposé** avec les bons arguments, sans jamais l'exécuter.
+- `Bus::fake()` + `Bus::assertBatched(fn ($batch) => ...)` : même chose pour un
+  `Bus::batch()` entier — nombre de jobs, sans lancer l'import CSV pour de vrai.
+- `Mail::fake()` + `Mail::assertQueued(TeamInvitationMail::class, ...)` — **pas**
+  `assertSent()` : un Mailable `ShouldQueue` envoyé via `->send()` est quand même
+  comptabilisé comme *queued* par le fake, pas *sent*. Message d'erreur de Laravel
+  explicite (« Did you mean assertQueued()? ») — suivi plutôt que deviné.
+- `Notification::fake()` + `assertSentTo($user, ...)` — c'est ce mécanisme qui a révélé
+  le bug de relation en cache ci-dessus.
+
+### Voyage dans le temps : `travel()`, `travelBack()`, `freezeTime()`
+
+`taskflow:cleanup-archived` : `$this->travel(-120)->days()` avant d'archiver un projet
+(le hook `Project::booted()` enregistre alors un `archived_at` vieux de 120 jours pour de
+vrai, sans forcer la colonne à la main), `travelBack()`, puis la commande. Pour
+`taskflow:send-weekly-report`, `$this->freezeTime()` fige « cette semaine » pendant tout
+le test — sans ça, une exécution à cheval sur minuit dimanche/lundi rendrait le calcul
+des tâches « terminées cette semaine » occasionnellement faux.
+Doc : https://laravel.com/docs/12.x/mocking#interacting-with-time
+
+### CSRF : pourquoi ce n'est **pas** testable avec le client de test standard
+
+Tentative initiale d'un test « POST sans jeton CSRF → 419 » : échec structurel, pas de
+code. `Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::handle()` contient
+littéralement `$this->runningUnitTests() ||` dans sa condition de passage — Laravel
+désactive volontairement cette vérification pendant les tests, pour ne pas obliger
+chaque test HTTP à gérer un jeton CSRF. Déjà vérifié en HTTP brut (Module 9, `POST
+/projects` sans jeton → **419** réel). Le XSS, en revanche, se teste normalement : une
+Resource ou une vue ne sait pas qu'elle est appelée depuis un test.
+
+### CI — GitHub Actions
+
+`.github/workflows/ci.yml` : Pint → Larastan → Pest à chaque push, sur `ubuntu-latest`,
+PHP 8.2 (mêmes extensions que le Module 8 : `gd` pour les miniatures). Base SQLite en
+mémoire (déjà la config de `phpunit.xml`) : aucun service MySQL nécessaire, les tests
+tournent identiquement en local et en CI.
+
+### Validation du module
+
+`php artisan test` : 86 tests verts (0 avant le Module 10 hors Breeze/API : 40 → 86,
+soit 46 tests écrits ce module-ci), `pint`/`phpstan` verts. Deux bugs réels trouvés et
+corrigés en écrivant ces tests (notification mal adressée, policies web bloquantes
+depuis le Module 9), plus un vrai gap de validation (assignation hors équipe). CI
+GitHub Actions en place — vérifiée pour de vrai après le push (pas seulement écrite).
+
+---
+
 ### Breeze : ce qu'il génère, et le piège de l'installation sur un projet existant
 
 `composer require laravel/breeze --dev` puis `php artisan breeze:install blade` génèrent :
