@@ -32,7 +32,13 @@ class UpdateTaskRequest extends FormRequest
             'status' => ['sometimes', Rule::enum(TaskStatus::class)],
             'priority' => ['sometimes', Rule::in(['low', 'normal', 'high'])],
             'due_date' => ['nullable', 'date', 'required_if:priority,high'],
-            'assignee_id' => ['nullable', 'exists:users,id', new NotAssignedToArchivedProject($project)],
+            // Même correctif que StoreTaskRequest (Module 10) : scopé à
+            // l'équipe du projet, pas n'importe quel utilisateur de la base.
+            'assignee_id' => [
+                'nullable',
+                Rule::exists('team_user', 'user_id')->where('team_id', $project->team_id),
+                new NotAssignedToArchivedProject($project),
+            ],
             'tags' => ['sometimes', 'array'],
             'tags.*' => ['integer', 'exists:tags,id'],
         ];

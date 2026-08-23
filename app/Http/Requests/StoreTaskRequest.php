@@ -29,7 +29,14 @@ class StoreTaskRequest extends FormRequest
             // Règle conditionnelle : une échéance devient obligatoire dès que la
             // priorité est "high" (sinon elle reste facultative).
             'due_date' => ['nullable', 'date', 'required_if:priority,high'],
-            'assignee_id' => ['nullable', 'exists:users,id', new NotAssignedToArchivedProject($project)],
+            // exists:users,id seul acceptait n'importe quel utilisateur de la
+            // base, même hors de l'équipe du projet (trouvé en testant,
+            // Module 10) : scopé à team_user pour cette équipe précise.
+            'assignee_id' => [
+                'nullable',
+                Rule::exists('team_user', 'user_id')->where('team_id', $project->team_id),
+                new NotAssignedToArchivedProject($project),
+            ],
             // Validation d'un tableau et de ses éléments (items.*).
             'tags' => ['sometimes', 'array'],
             'tags.*' => ['integer', 'exists:tags,id'],
