@@ -2,12 +2,16 @@
 
 namespace App\Http\Controllers;
 
+use App\Actions\Tasks\CreateTaskAction;
+use App\Actions\Tasks\MoveTaskAction;
 use App\DataTransferObjects\CreateTaskData;
 use App\Enums\TaskStatus;
+use App\Http\Requests\MoveTaskRequest;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Models\Project;
 use App\Models\Task;
+use App\Queries\TaskQuery;
 use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
 
@@ -16,7 +20,7 @@ class TaskController extends Controller implements HasMiddleware
     public static function middleware(): array
     {
         return [
-            new Middleware('project.active', only: ['store', 'update', 'destroy']),
+            new Middleware('project.active', only: ['store', 'update', 'destroy', 'move']),
         ];
     }
 
@@ -27,7 +31,7 @@ class TaskController extends Controller implements HasMiddleware
     {
         $this->authorize('view', $project);
 
-        return $project->tasks;
+        return TaskQuery::for($project)->get();
     }
 
     /**
@@ -41,26 +45,13 @@ class TaskController extends Controller implements HasMiddleware
     /**
      * Store a newly created resource in storage.
      */
-    public function store(StoreTaskRequest $request, Project $project)
+    public function store(StoreTaskRequest $request, Project $project, CreateTaskAction $action)
     {
         $this->authorize('create', [Task::class, $project]);
 
         $data = CreateTaskData::fromArray($request->validated());
 
-        /** @var Task $task */
-        $task = $project->tasks()->create([
-            'title' => $data->title,
-            // Explicite plutôt que de compter sur le DEFAULT 'todo' de la
-            // colonne (Module 3) : sans ça, le modèle en mémoire garde
-            // status = null juste après create() jusqu'au prochain rechargement
-            // depuis la base — l'enum caché plante au premier ->value lu.
-            'status' => TaskStatus::Todo->value,
-            'priority' => $data->priority ?? 'normal',
-            'due_date' => $data->dueDate,
-            'assignee_id' => $data->assigneeId,
-        ]);
-
-        $task->tags()->sync($data->tagIds);
+        $task = $action->handle($project, $data);
 
         return response()->json($task->load('tags'), 201);
     }
@@ -101,6 +92,22 @@ class TaskController extends Controller implements HasMiddleware
         if (array_key_exists('tags', $validated)) {
             $task->tags()->sync($validated['tags']);
         }
+
+        return $task->fresh('tags');
+    }
+
+    /**
+     * Déplace une tâche vers un nouveau statut (carte glissée sur le tableau
+     * kanban, Module 13). Même autorisation que la modification générale :
+     * déplacer est un cas particulier de modifier.
+     */
+    public function move(MoveTaskRequest $request, Project $project, Task $task, MoveTaskAction $action)
+    {
+        $this->authorize('update', $task);
+
+        $status = TaskStatus::from($request->validated('status'));
+
+        $task = $action->handle($task, $status);
 
         return $task->fresh('tags');
     }

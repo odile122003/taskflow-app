@@ -1675,3 +1675,121 @@ e-mail avec lien signé (202) puis rattachement effectif au clic. `php artisan t
 vert (25 tests, dont les 15 générés par Breeze, tous lus avant d'être acceptés tels quels).
 
 ---
+
+## Module 11 — Architecture et code propre
+
+### Action classes : un cas d'usage, une classe
+
+`CreateTaskAction` (`app/Actions/Tasks/CreateTaskAction.php`) sort de `TaskController::store()`
+tout ce qui n'est pas « recevoir → déléguer → répondre ». Une seule méthode publique
+(`handle()`), instanciée automatiquement en paramètre de méthode de contrôleur (injection
+de méthode, résolue par le conteneur de service). Le DTO `CreateTaskData` (Module 5)
+reste séparé : il ne transporte que des données validées, l'Action ne transporte que du
+comportement — chaque classe une seule responsabilité.
+Doc (injection automatique) : https://laravel.com/docs/12.x/container#automatic-injection
+
+**Pourquoi une Action plutôt qu'un `TaskService` avec plusieurs méthodes ?** Un service
+généraliste (`create`, `update`, `move`, `assign`…) redevient vite un God Object flou.
+Une classe par cas d'usage force un nom précis, isole les dépendances, et se teste sans
+policy ni HTTP — vérifié directement en Tinker :
+```php
+(new \App\Actions\Tasks\CreateTaskAction())->handle($project, $data); // crée une tâche, sans route ni contrôleur
+```
+
+Bénéfice concret trouvé en pratiquant : le contrôleur **API** (`Api\V1\TaskController::store`)
+dupliquait exactement la même logique de création que le contrôleur web avant
+l'extraction. Les deux utilisent maintenant la même `CreateTaskAction` — un seul endroit
+où « comment créer une tâche » peut avoir un bug, pas deux.
+
+### Query objects : centraliser la construction d'une requête réutilisée
+
+`TaskQuery::for($project)` (`app/Queries/TaskQuery.php`) remplace `$project->tasks` (web,
+sans eager loading) et `$project->tasks()->with(['assignee', 'tags'])` (API, dupliqué dans
+le contrôleur). Avant cette classe, seul le contrôleur API chargeait ces relations ; le
+contrôleur web ne les chargeait jamais. Les deux consommateurs partagent maintenant la même
+base — un futur troisième endroit qui liste des tâches ne peut plus oublier ce `with()` et
+recréer un N+1 caché.
+```php
+QueryBuilder::for(TaskQuery::for($project))->allowedFilters([...])->allowedSorts([...])
+```
+`spatie/laravel-query-builder` (Module 9) continue de gérer le filtrage/tri piloté par
+l'URL — `TaskQuery` ne fait pas double emploi avec lui, il centralise seulement ce qui était
+dupliqué : *quelle* requête de base interroger, pas *comment* la piloter depuis la requête HTTP.
+
+Piège réel rencontré : `TaskQuery::for()` typé `: Builder` faisait échouer Larastan —
+`$project->tasks()` renvoie `HasMany<Task, Project>`, pas un `Builder` générique (une
+relation Eloquent *décore* un query builder, elle n'en est pas un au sens du type). Corrigé
+en typant le retour `HasMany<Task, Project>`, vérifié avec `$query->toSql()` et
+`$query->getEagerLoads()` en Tinker.
+
+### MoveTaskAction : une Action peut justifier sa propre route
+
+`update()` (générique, tous champs) existait déjà ; « déplacer une tâche » n'avait pas
+d'équivalent avant ce module. Décision de conception (pas une connaissance Laravel) :
+ajouter une route dédiée `PATCH /projects/{project}/tasks/{task}/move`, plus étroite qu'un
+`update()` qui accepterait n'importe quel champ — c'est exactement l'interaction qu'un
+tableau kanban à glisser-déposer (Module 13) déclenchera. `MoveTaskRequest` valide
+uniquement `status` (`Rule::enum(TaskStatus::class)`) ; l'autorisation reste
+`TaskPolicy::update` (déplacer est un cas particulier de modifier, pas une règle
+différente). Toute la logique métier du changement de statut (`completed_at`, événement
+`TaskMoved`) vit déjà dans `TaskObserver` (Module 8) et se déclenche normalement puisque
+`MoveTaskAction::handle()` passe par `Task::update()` — rien à dupliquer.
+
+Piège de routing : les routes hors `Route::resource(...)->scoped()` (comme les routes
+d'attachments, Module 7) ne vérifient pas automatiquement que `{task}` appartient au
+`{project}` de l'URL — `->scoped()` est un raccourci spécifique aux resources. Pour la
+route `move`, ajout explicite de `->scopeBindings()`, l'équivalent générique pour une route
+non-resource. Vérifié avec une vraie requête HTTP (PowerShell, session + jeton CSRF réels) :
+`PATCH /projects/projet-actif-demo/tasks/33/move {"status":"in_progress"}` → tâche
+effectivement déplacée, confirmé en relisant la ligne en base.
+
+### Interface + deux implémentations : quand ça vaut le coût, quand c'est du cargo cult
+
+`App\Contracts\AttachmentStorage` (`store`, `delete`, `download`) découple
+`AttachmentController` du mécanisme de stockage réel. Point important, assumé
+explicitement : Laravel **résout déjà** le problème « changer de disque sans changer de
+code » via `config/filesystems.php` + `FILESYSTEM_DISK` — ajouter cette interface pour
+« pouvoir passer de local à s3 » aurait été le repository cargo cult que ce module met en
+garde contre. Le bénéfice réel visé ici est différent : substituer l'implémentation
+**entière** via le conteneur, pour des tests qui ne touchent aucun disque, ni réel ni faux.
+
+- `DiskAttachmentStorage` : implémentation par défaut, délègue à la façade `Storage`
+  (donc `Storage::fake()`, Module 10, continue de fonctionner de façon transparente —
+  vérifié en relançant `AttachmentTest.php` sans le modifier, toujours vert).
+- `InMemoryAttachmentStorage` : implémentation de test, garde les fichiers dans un
+  tableau PHP privé, n'écrit jamais sur un filesystem, réel ou temporaire.
+
+Bindées dans `AppServiceProvider::register()` :
+```php
+$this->app->bind(AttachmentStorage::class, DiskAttachmentStorage::class);
+```
+puis substituée dans un test avec `$this->app->singleton(AttachmentStorage::class, InMemoryAttachmentStorage::class)`
+(`AttachmentStorageSwapTest.php`) — **`singleton`, pas `bind`** : avec `bind`, chaque
+résolution recrée une nouvelle instance avec un tableau `$files` vide, donc l'instance
+utilisée par le contrôleur pendant la requête HTTP ne serait pas celle interrogée ensuite
+dans l'assertion du test. Bug trouvé en écrivant le test lui-même, avant même de le lancer.
+
+### Validation du module
+
+`TaskController` et `AttachmentController` : chaque méthode tient sous 10 lignes de code
+(hors commentaires). `php artisan test` : 93 tests verts (dont 7 nouveaux pour ce module :
+`MoveTaskTest`, `AttachmentStorageSwapTest`), `pint`/`phpstan` verts.
+
+### Exercices de consolidation
+
+*(Regroupés ici plutôt que posés en cours de séance, à la demande de l'apprenant — 2026-08-24.)*
+
+- **CreateTaskAction vs CreateTaskData** — pourquoi ces deux classes restent séparées
+  plutôt que fusionnées en une seule. *Répondu correctement dans la séance : le DTO ne
+  transporte que des données, l'Action ne transporte que du comportement de création —
+  chaque classe une seule responsabilité.*
+- **AttachmentStorage** — `Storage::fake()` donne déjà un disque factice pour les tests
+  (Module 10). Qu'est-ce que l'interface `AttachmentStorage` + `InMemoryAttachmentStorage`
+  apporte que `Storage::fake()` ne donnait pas déjà ? (Indice : où vit la substitution —
+  au niveau du disque, ou au niveau de la classe qui l'utilise ?)
+- **TaskQuery** — le fichier a un seul point d'entrée statique (`TaskQuery::for()`)
+  plutôt qu'une instance avec des méthodes de filtrage chaînables (`->overdue()`,
+  `->assignedTo()`…). Dans quel cas cette classe grossirait au point de justifier de
+  vraies méthodes d'instance plutôt qu'un simple point d'entrée statique ?
+
+---

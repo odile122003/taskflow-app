@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Contracts\AttachmentStorage;
 use App\Http\Requests\StoreAttachmentRequest;
 use App\Jobs\GenerateThumbnail;
 use App\Models\Attachment;
@@ -9,22 +10,20 @@ use App\Models\Project;
 use App\Models\Task;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AttachmentController extends Controller
 {
     /**
-     * Storage::disk() sans argument = le disque par défaut (FILESYSTEM_DISK).
-     * Aucune méthode de ce contrôleur ne nomme "local" ou "s3" : changer le
-     * disque par défaut dans .env suffit à tout déplacer, sans toucher au code.
+     * AttachmentStorage $storage : le contrôleur ne sait pas s'il écrit sur
+     * le disque local, sur S3, ou nulle part (tests). Voir App\Contracts\AttachmentStorage.
      */
-    public function store(StoreAttachmentRequest $request, Project $project, Task $task): JsonResponse
+    public function store(StoreAttachmentRequest $request, Project $project, Task $task, AttachmentStorage $storage): JsonResponse
     {
         $this->authorize('update', $task);
 
         $file = $request->file('file');
-        $path = $file->store('attachments/'.$task->id);
+        $path = $storage->store($file, 'attachments/'.$task->id);
 
         $attachment = $task->attachments()->create([
             'user_id' => $request->user()->id,
@@ -49,20 +48,20 @@ class AttachmentController extends Controller
      * (`local`) ou public (`s3`), et surtout ça passe par la policy — un
      * lien de fichier n'est jamais accessible à qui n'est pas de l'équipe.
      */
-    public function download(Project $project, Task $task, Attachment $attachment): StreamedResponse
+    public function download(Project $project, Task $task, Attachment $attachment, AttachmentStorage $storage): StreamedResponse
     {
         $this->authorize('view', $task);
         $this->abortUnlessBelongsToTask($attachment, $task);
 
-        return Storage::download($attachment->path, $attachment->original_name);
+        return $storage->download($attachment->path, $attachment->original_name);
     }
 
-    public function destroy(Project $project, Task $task, Attachment $attachment): Response
+    public function destroy(Project $project, Task $task, Attachment $attachment, AttachmentStorage $storage): Response
     {
         $this->authorize('update', $task);
         $this->abortUnlessBelongsToTask($attachment, $task);
 
-        Storage::delete($attachment->path);
+        $storage->delete($attachment->path);
         $attachment->delete();
 
         return response()->noContent();

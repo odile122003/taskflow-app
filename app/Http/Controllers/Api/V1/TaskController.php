@@ -2,14 +2,15 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Actions\Tasks\CreateTaskAction;
 use App\DataTransferObjects\CreateTaskData;
-use App\Enums\TaskStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Http\Resources\TaskResource;
 use App\Models\Project;
 use App\Models\Task;
+use App\Queries\TaskQuery;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Response;
 use Spatie\QueryBuilder\AllowedFilter;
@@ -30,7 +31,7 @@ class TaskController extends Controller
     {
         $this->authorize('view', $project);
 
-        $tasks = QueryBuilder::for($project->tasks()->with(['assignee', 'tags']))
+        $tasks = QueryBuilder::for(TaskQuery::for($project))
             ->allowedFilters([
                 'status',
                 AllowedFilter::callback(
@@ -45,26 +46,13 @@ class TaskController extends Controller
         return TaskResource::collection($tasks);
     }
 
-    public function store(StoreTaskRequest $request, Project $project): TaskResource
+    public function store(StoreTaskRequest $request, Project $project, CreateTaskAction $action): TaskResource
     {
         $this->authorize('create', [Task::class, $project]);
 
         $data = CreateTaskData::fromArray($request->validated());
 
-        $task = $project->tasks()->create([
-            'title' => $data->title,
-            // Explicite plutôt que de compter sur le DEFAULT 'todo' de la
-            // colonne (Module 3) : sans ça, le modèle en mémoire garde
-            // status = null juste après create() (bug réel trouvé ici même,
-            // en testant l'API — la version web le cachait silencieusement,
-            // voir CONCEPTS.md).
-            'status' => TaskStatus::Todo->value,
-            'priority' => $data->priority ?? 'normal',
-            'due_date' => $data->dueDate,
-            'assignee_id' => $data->assigneeId,
-        ]);
-
-        $task->tags()->sync($data->tagIds);
+        $task = $action->handle($project, $data);
 
         return new TaskResource($task->load(['assignee', 'tags']));
     }
