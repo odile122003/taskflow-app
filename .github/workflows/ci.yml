@@ -13,8 +13,11 @@ jobs:
     # Scout (Module 12) interroge un vrai Meilisearch pendant les tests -
     # phpunit.xml ne fixe pas SCOUT_DRIVER comme il fixe CACHE_STORE=array,
     # donc .env.example (SCOUT_DRIVER=meilisearch) s'applique tel quel ici
-    # aussi. Le healthcheck bloque le démarrage des steps tant que le
-    # service n'est pas prêt, pas besoin d'attendre à la main.
+    # aussi. Pas de --health-cmd ici : l'image officielle getmeili/meilisearch
+    # est minimale (pas de wget/curl/shell à l'intérieur) - un healthcheck
+    # Docker dessus fait échouer "Initialize containers" avant même le
+    # premier step (constaté en CI réelle). On attend sa disponibilité
+    # depuis le runner à la place (qui a curl), pas depuis le conteneur.
     services:
       meilisearch:
         image: getmeili/meilisearch:v1.53
@@ -22,11 +25,6 @@ jobs:
           - 7700:7700
         env:
           MEILI_NO_ANALYTICS: true
-        options: >-
-          --health-cmd "wget --spider -q http://localhost:7700/health || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
 
     steps:
       - name: Checkout
@@ -60,6 +58,9 @@ jobs:
 
       - name: Directory permissions
         run: chmod -R 777 storage bootstrap/cache
+
+      - name: Wait for Meilisearch
+        run: timeout 30 bash -c 'until curl -sf http://127.0.0.1:7700/health; do sleep 1; done'
 
       # project_id doit être déclaré filterable avant le premier ->where()
       # dessus (Task::search()->where('project_id', ...)) - update() ne
