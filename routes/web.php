@@ -19,8 +19,11 @@ Route::middleware(['auth', 'verified', 'team.current'])->group(function () {
     Route::get('/team/stats', TeamStatsController::class)->name('team.stats');
 
     Route::resource('projects', ProjectController::class);
-    Route::get('projects/{project}/board', [ProjectController::class, 'board'])->name('projects.board');
-    Route::resource('projects.tasks', TaskController::class)->scoped();
+    Route::livewire('projects/{project}/board', 'pages::projects.kanban-board')->name('projects.board');
+    // Avant resource() : sinon son 'show' ({project}/tasks/{task}) capturerait
+    // "create" comme un id/slug de tâche littéral.
+    Route::livewire('projects/{project}/tasks/create', 'pages::projects.tasks.create')->name('projects.tasks.create');
+    Route::resource('projects.tasks', TaskController::class)->scoped()->except('create');
     Route::patch('projects/{project}/tasks/{task}/move', [TaskController::class, 'move'])
         ->scopeBindings()
         ->name('tasks.move');
