@@ -1943,3 +1943,151 @@ absence de doublon/saut entre pages) l'est, à petite échelle
 `TaskSearchTest`). `php artisan test` : 110 tests verts, `pint`/`phpstan` verts.
 
 ---
+
+## Module 13 — Front moderne (voie Livewire + Alpine)
+
+Voie choisie parmi les trois du plan (Livewire+Alpine, Inertia+Vue, API+front séparé) :
+profil back qui veut de l'interactif sans écrire de JS côté client, et Alpine.js était
+déjà installé depuis le Module 0.
+
+### Livewire 4 : composants mono-fichier, une vraie rupture avec la v3
+
+`composer require livewire/livewire` a installé la **v4.4.1** (sortie quelques jours
+avant cette séance) — sa convention par défaut n'est plus classe PHP + vue séparées
+(`app/Livewire/*.php` + `resources/views/livewire/*.blade.php`, toujours possible via
+`--class`) mais un **fichier unique** : `<?php … new class extends Component { … }; ?>`
+suivi du template Blade, dans `resources/views/components/…/⚡nom.blade.php` (le ⚡ est
+purement cosmétique, désactivable). Aucune documentation externe à jour n'existait encore
+pour cette version au moment de la séance — la doc officielle est allée chercher
+directement dans `vendor/livewire/livewire/docs/*.md` (bundlée avec le paquet, source
+plus fiable qu'une recherche web sur une version tout juste sortie) et dans les règles
+internes des mainteneurs (`vendor/livewire/livewire/.claude/rules/*.md`), qui imposent
+notamment : ne jamais exposer une Collection Eloquent en propriété publique
+(utiliser `#[Computed]`), toujours scoper un lookup via une relation
+(`$this->project->tasks()->findOrFail()`, jamais `Task::findOrFail()`), et préfixer les
+méthodes appelables par `handle` (`handleMove`, pas `move`).
+
+### `Route::livewire()` : composants comme pages entières
+
+```php
+Route::livewire('projects/{project}/board', 'pages::projects.kanban-board')->name('projects.board');
+```
+`pages::` est un espace de nommage dédié (`resources/views/pages/…`) qui distingue les
+composants **pages** (routés directement) des composants **réutilisables** (inclus dans
+une vue via `<livewire:… />`). Le binding de route est automatique : `public Project $project`
+sur le composant se peuple tout seul, sans `mount()`, exactement comme un contrôleur.
+Layout attendu par convention : `layouts::app` → `resources/views/layouts/app.blade.php`,
+créé pour déléguer entièrement au `<x-layout>` existant (Module 2) plutôt que dupliquer
+l'en-tête.
+Doc : `vendor/livewire/livewire/docs/pages.md`
+
+### Piège réel : deux instances Alpine sur la même page
+
+Livewire embarque sa propre instance Alpine (`@livewireScripts`). `app.js` importait et
+démarrait Alpine séparément (`import Alpine from 'alpinejs'; Alpine.start()`) depuis le
+Module 0 — les deux runtimes coexisteraient sans se voir, cassant `$wire` dans les
+directives Alpine des composants Livewire. Retiré (`app.js` ne fait plus qu'importer
+`bootstrap.js`), après avoir vérifié qu'aucun plugin/directive Alpine personnalisé
+n'existait dans le projet. La modale `x-data` existante (Module 6) fonctionne toujours,
+maintenant à travers l'Alpine fourni par Livewire — vérifié en navigateur réel.
+
+### Glisser-déposer réel, `#[Computed]`, actions scopées
+
+`KanbanBoard` remplace `ProjectController::board()` (qui envoyait un `fetch()` manuel
+avec en-tête CSRF à la main vers `PATCH .../move`, et rechargeait toute la page au moindre
+déplacement — même le sien). HTML5 drag & drop natif via des directives Alpine
+(`x-on:dragstart`, `x-on:dragover.prevent`, `x-on:drop="$wire.handleMove(...)"`) — Livewire
+gère le jeton CSRF automatiquement, aucun `fetch()` à écrire.
+```php
+#[Computed]
+public function tasksByStatus() { return $this->project->tasks()->with('assignee')->get()->groupBy(...); }
+
+public function handleMove(int $taskId, string $status): void
+{
+    $task = $this->project->tasks()->findOrFail($taskId); // scopé, jamais Task::findOrFail()
+    $this->authorize('update', $task);
+    app(MoveTaskAction::class)->handle($task, TaskStatus::from($status)); // Module 11, réutilisée telle quelle
+    unset($this->tasksByStatus); // invalide le memo pour ce même re-rendu
+}
+```
+`#[Computed]` plutôt qu'une propriété publique exposant la Collection : mémoïsé pour la
+durée d'une seule requête (jamais entre deux mises à jour — piège documenté dans
+`computed-properties.md`, un `unset()` est nécessaire après toute écriture qui la rend
+obsolète), et surtout jamais sérialisée dans l'état Livewire côté client — une Collection
+de modèles en propriété publique le serait, exposant potentiellement des colonnes non
+voulues.
+
+**Vérifié réellement avec Playwright**, pas seulement supposé fonctionner : premiers
+essais faussement négatifs à cause de sélecteurs de test ambigus
+(`button[type=submit]` matchait le bouton « Déconnexion » de l'en-tête *avant* celui du
+formulaire — présent sur toute page authentifiée) et d'un utilisateur de test créé via
+`firstOrCreate()` donc jamais marqué comme ayant vérifié son e-mail (redirection
+silencieuse vers `/verify-email`). Une fois les deux corrigés : glisser-déposer confirmé
+par la requête `POST livewire-.../update` tracée et par le comptage des colonnes avant/après
+(`2/1/0` → `1/2/0`).
+
+### Formulaire de création : `wire:model`, validation temps réel
+
+`TaskController::create()` était un `abort(501, '… à implémenter au Module 13')` laissé
+en attente depuis le Module 5 — ce module referme exactement ce fil.
+```blade
+<input wire:model.live.blur="title">
+```
+`wire:model.live.blur` déclenche une requête réseau quand le champ perd le focus (pas à
+chaque frappe) ; combiné à `#[Validate]` sur la propriété, la règle associée s'applique
+immédiatement, sans code supplémentaire.
+Doc : `vendor/livewire/livewire/docs/validation.md#real-time-validation`
+
+Pas de duplication des règles : `StoreTaskRequest::rulesFor(Project $project)` extrait de
+`rules()` (qui lisait `$this->route('project')`, indisponible hors contexte HTTP) — la
+même validation protège l'API (Module 9), le formulaire HTML classique et ce composant.
+Seule adaptation : les clés traduites en camelCase (`due_date` → `dueDate`) pour
+correspondre aux noms de propriétés PHP (convention du projet, voir `CLAUDE.md` — les
+colonnes restent en snake_case, les variables non).
+
+### Événements temps réel entre utilisateurs
+
+L'ancienne vue écoutait `TaskMoved` (Module 8) en JavaScript brut
+(`window.Echo.private(...).listen('.task.moved', () => location.reload())`) — un
+rechargement complet de page pour un seul changement. Remplacé par :
+```php
+#[On('echo-private:projects.{project.id},.task.moved')]
+public function handleMovedElsewhere(): void
+{
+    unset($this->tasksByStatus);
+    $this->movedByOther = true;
+}
+```
+`{project.id}` à l'intérieur de la chaîne : interpolation dynamique du nom de canal
+(indispensable ici, un tableau ne doit jamais recevoir les déplacements d'un *autre*
+projet) ; le `.` devant `task.moved` : `broadcastAs()` renvoie un nom personnalisé, pas
+le nom de la classe d'événement (convention Echo, pas seulement Livewire).
+
+**Piège réel, trouvé en testant à deux onglets** : `TaskMoved implements ShouldBroadcast`
+(Module 8) — la diffusion est mise en **file d'attente**, pas envoyée en synchrone.
+`QUEUE_CONNECTION=database` en local : sans `php artisan queue:work` réellement lancé, le
+job reste indéfiniment dans la table `jobs`, jamais diffusé — 46 jobs accumulés
+silencieusement pendant les essais précédents avant que ça ne saute aux yeux. Vérifié
+pour de vrai avec Reverb (`php artisan reverb:start`) et un worker tournant, à travers
+**deux onglets Playwright indépendants** : le second onglet reçoit la trame WebSocket
+(`{"event":"task.moved","data":{...}}`) et affiche la bannière, sans recharger la page.
+
+### Environnement local : trois processus à faire tourner (Redis/Meilisearch déjà vus, Module 12)
+
+Le Module 13 ajoute Reverb et un worker de queue à la liste des processus locaux
+nécessaires pour que la diffusion temps réel fonctionne réellement, pas seulement en
+apparence :
+```bash
+php artisan reverb:start        # serveur WebSocket
+php artisan queue:work          # sinon TaskMoved reste en file indéfiniment
+```
+
+### Validation du module
+
+`php artisan test` : 122 tests verts (12 nouveaux : `KanbanBoardTest`,
+`TaskCreateFormTest`), `pint`/`phpstan` verts. Vérifié en navigateur réel à chaque étape
+(Playwright) plutôt que supposé fonctionner à la lecture du code — trois bugs réels
+trouvés uniquement grâce à ça (sélecteur de bouton ambigu, e-mail non vérifié, jobs de
+diffusion jamais traités).
+
+---
