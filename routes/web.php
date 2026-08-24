@@ -9,12 +9,14 @@ use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\TaskController;
 use App\Http\Controllers\TaskImportController;
 use App\Http\Controllers\TeamMemberController;
+use App\Http\Controllers\TeamStatsController;
 use Illuminate\Support\Facades\Route;
 
 Route::redirect('/', '/projects');
 
 Route::middleware(['auth', 'verified', 'team.current'])->group(function () {
     Route::get('/dashboard', DashboardController::class)->name('dashboard');
+    Route::get('/team/stats', TeamStatsController::class)->name('team.stats');
 
     Route::resource('projects', ProjectController::class);
     Route::get('projects/{project}/board', [ProjectController::class, 'board'])->name('projects.board');

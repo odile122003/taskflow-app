@@ -3,7 +3,9 @@
 namespace App\Providers;
 
 use App\Contracts\AttachmentStorage;
+use App\Models\Project;
 use App\Models\Task;
+use App\Observers\ProjectObserver;
 use App\Observers\TaskObserver;
 use App\Services\Attachments\DiskAttachmentStorage;
 use App\Services\TaskNumberGenerator;
@@ -36,6 +38,7 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Task::observe(TaskObserver::class);
+        Project::observe(ProjectObserver::class);
 
         // Transforme un accès à une relation non chargée en exception plutôt
         // qu'en requête SQL supplémentaire silencieuse. Seulement hors
