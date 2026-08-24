@@ -23,6 +23,18 @@ class StoreTaskRequest extends FormRequest
         /** @var Project $project */
         $project = $this->route('project');
 
+        return self::rulesFor($project);
+    }
+
+    /**
+     * Extrait de rules() pour être réutilisable hors contexte HTTP (le
+     * formulaire de création en Livewire, Module 13, n'a pas de route
+     * dont déduire {project} — le composant le connaît déjà directement).
+     *
+     * @return array<string, ValidationRule|array<mixed>|string>
+     */
+    public static function rulesFor(Project $project): array
+    {
         return [
             'title' => ['required', 'string', 'max:255'],
             'priority' => ['sometimes', Rule::in(['low', 'normal', 'high'])],

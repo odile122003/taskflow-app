@@ -46,14 +46,6 @@ class TaskController extends Controller implements HasMiddleware
     }
 
     /**
-     * Show the form for creating a new resource.
-     */
-    public function create(Project $project)
-    {
-        abort(501, 'Formulaire de création à implémenter au Module 13 (front interactif)');
-    }
-
-    /**
      * Store a newly created resource in storage.
      */
     public function store(StoreTaskRequest $request, Project $project, CreateTaskAction $action)
