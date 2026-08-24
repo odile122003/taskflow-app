@@ -3,12 +3,15 @@
 namespace App\Providers;
 
 use App\Contracts\AttachmentStorage;
+use App\Models\Project;
 use App\Models\Task;
+use App\Observers\ProjectObserver;
 use App\Observers\TaskObserver;
 use App\Services\Attachments\DiskAttachmentStorage;
 use App\Services\TaskNumberGenerator;
 use App\Support\CurrentTeam;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -35,6 +38,13 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Task::observe(TaskObserver::class);
+        Project::observe(ProjectObserver::class);
+
+        // Transforme un accès à une relation non chargée en exception plutôt
+        // qu'en requête SQL supplémentaire silencieuse. Seulement hors
+        // production : chez un vrai utilisateur, un N+1 dégrade la réponse,
+        // il ne doit jamais la faire planter.
+        Model::preventLazyLoading(! app()->isProduction());
 
         // Par jeton plutôt que par utilisateur : deux jetons du même compte
         // (un script d'import, une appli mobile) ne doivent pas se gêner —

@@ -1793,3 +1793,153 @@ dans l'assertion du test. Bug trouvé en écrivant le test lui-même, avant mêm
   vraies méthodes d'instance plutôt qu'un simple point d'entrée statique ?
 
 ---
+
+## Module 12 — Performance et montée en charge
+
+### Environnement local : Redis et Meilisearch via WSL
+
+Ni Redis ni Meilisearch n'étaient disponibles nativement sur cette machine Windows
+(Herd, dans sa forme actuelle, ne les fournit pas). Les deux tournent dans WSL (Ubuntu),
+avec le transfert automatique `localhost` de WSL2 vers Windows — `redis-cli`/`meilisearch`
+écoutent sur `127.0.0.1` côté WSL, directement joignables depuis PHP côté Windows sans
+configuration réseau supplémentaire. Piège rencontré : WSL arrête sa VM légère (et donc
+tous les services qui y tournent) dès qu'aucune commande n'y est active — une commande
+`tail -f /dev/null` maintenue en arrière-plan garde la session (et Redis/Meilisearch)
+vivante pour la durée du travail. **À redémarrer à chaque nouvelle session de travail**
+si Windows ou WSL a redémarré entretemps :
+```bash
+wsl -d Ubuntu -e bash -c "sudo service redis-server start && sleep 1 && ~/meilisearch --db-path ~/meili-data --http-addr 127.0.0.1:7700"
+```
+Second piège, plus insidieux : le DNS de WSL (`/etc/resolv.conf`, régénéré à chaque boot)
+pointait vers un résolveur d'entreprise injoignable depuis ce conteneur — `apt`/`curl`
+échouaient avec des erreurs de résolution DNS. Corrigé durablement via `/etc/wsl.conf`
+(`[network]` `generateResolvConf = false`) puis un `/etc/resolv.conf` fixe (`8.8.8.8`),
+plutôt qu'à corriger à la main à chaque nouvelle invocation.
+
+### `Model::preventLazyLoading()` : ne protège que les collections
+
+Doc : https://laravel.com/docs/12.x/eloquent-relationships#preventing-lazy-loading
+```php
+Model::preventLazyLoading(! app()->isProduction());
+```
+Jamais en production : un N+1 dégrade une réponse, il ne doit jamais la faire planter
+chez un vrai utilisateur.
+
+**Piège réel, vérifié par la lecture du code source d'Eloquent** (`Builder::hydrate()`) :
+la protection ne s'active sur une instance que si la requête a renvoyé **plus d'un**
+modèle (`if (count($items) > 1)`). Un `Task::first()` isolé n'écrira jamais l'exception,
+même avec une relation non chargée — seule une vraie collection (`$project->tasks` puis
+boucle) le fait, ce qui est cohérent avec l'intention : un N+1 est par définition une
+boucle sur plusieurs lignes, pas un accès isolé. Vérifié en Tinker : `Task::first()->assignee`
+ne lève rien, `$project->tasks->each(fn ($t) => $t->assignee)` lève
+`LazyLoadingViolationException`.
+
+Aucun N+1 réel trouvé dans les vues actuelles (`dashboard.blade.php`, `board.blade.php`) :
+déjà eager-chargées depuis les modules précédents (Module 4, Module 9). Figé par un test
+qui prouve à la fois que le mécanisme est actif et que les pages réelles ne le déclenchent
+jamais — la seule façon de garantir qu'un futur ajout de champ dans la vue ne recrée pas
+silencieusement un N+1.
+
+### Cache : `Cache::tags()`, invalidation par événement, pas seulement par TTL
+
+`Cache::tags()` nécessite un store qui le supporte explicitement — jamais `database` ni
+`file` (`BadMethodCallException` à l'exécution, pas à la configuration). D'où le passage
+de `CACHE_STORE=database` à `redis` (`REDIS_CLIENT=predis`, client pur PHP, pas
+d'extension à compiler — plus simple que `phpredis` sur Windows).
+
+`TeamStatsCache::remember(Team $team)` : projets, tâches par statut, tâches terminées ce
+mois — un `GROUP BY` en base, jamais un `->get()` de toutes les tâches suivi d'un
+`groupBy()` PHP (Module 4 avait fait l'inverse dans `DashboardController`, remplacé ici).
+Invalidation par `ProjectObserver`/`TaskObserver` sur les écritures qui changent
+réellement ces chiffres (création/suppression de tâche ou de projet, **changement de
+statut uniquement** — un changement de titre ou d'assigné ne rend pas ces chiffres
+obsolètes, inutile de vider le cache pour ça). Vérifié avec le vrai Redis (pas seulement
+le store `array` des tests) : 3 requêtes SQL au premier appel, 0 au second ; invalidation
+confirmée en HTTP réel (créer une tâche change `/team/stats` immédiatement, sans attendre
+le TTL de 15 minutes).
+Doc : https://laravel.com/docs/12.x/cache#cache-tags
+
+### Recherche full-text : à la main, puis Scout + Meilisearch
+
+Recherche nommée explicitement dans `CLAUDE.md` comme un des trois exemples où on code à
+la main avant d'adopter un package. Version manuelle (`WHERE title LIKE '%...%'`),
+douleur vérifiée par un vrai test : une seule lettre de faute de frappe
+(« paginaton » au lieu de « pagination ») ne trouvait rien. Remplacée par
+`laravel/scout` + Meilisearch : `Task implements Searchable`, `toSearchableArray()`
+n'expose que `id`/`title`/`project_id` (`project_id` seul champ déclaré filtrable dans
+`config/scout.php` — jamais indexer un champ qu'on ne recherche jamais). La même faute
+de frappe retrouve maintenant la tâche, triée par pertinence.
+Doc : https://laravel.com/docs/12.x/scout
+
+**Piège réel, découvert en écrivant les tests** : Meilisearch indexe de façon
+asynchrone en interne, même quand Scout appelle son API de façon synchrone —
+`addDocuments()` (dans `MeilisearchEngine::update()`) est fire-and-forget, sans
+`waitForTask()`. Un test qui crée une tâche puis la cherche immédiatement est en course
+avec l'indexation réelle : parfois vert, parfois rouge selon le timing de la machine.
+Corrigé par `waitForMeilisearch()` (`tests/Pest.php`), qui interroge l'API des tâches
+Meilisearch jusqu'à ce qu'il n'y en ait plus en cours (max 5 s), plutôt qu'un `sleep()`
+fixe et fragile.
+
+CI : Meilisearch n'existe pas sur le runner GitHub Actions par défaut — ajout d'un
+service dédié (`getmeili/meilisearch` en conteneur, avec healthcheck) et d'une étape
+`scout:sync-index-settings` avant les tests (sans elle, `->where('project_id', ...)`
+échoue sur un index frais sans attribut filtrable déclaré — `update()` ne pousse jamais
+les réglages tout seul).
+
+### Pagination performante : l'exercice à 500 000 tâches, mesuré à chaque étape
+
+Objectif du module : liste paginée sous 200 ms sur un projet de 500 000 tâches
+(`taskflow:seed-benchmark`, commande réutilisable — `INSERT` en masse via `DB::table()`,
+jamais `Task::factory()->create()` en boucle, qui aurait déclenché 500 000 fois les
+observers pour rien).
+
+**Étape 1 — sans index dédié.** Même la page 1 (`OFFSET 0`) coûtait **~2,9 s** : `ORDER BY
+created_at` sans index adapté force un tri complet en mémoire (`Using filesort`) sur les
+500 000 lignes du projet, avant même de considérer l'`OFFSET`.
+
+**Étape 2 — piège réel, l'index seul ne suffit pas.** Migration ajoutant
+`(project_id, created_at)`. Résultat inchangé (~2,2 s), et `EXPLAIN` — même avec
+`FORCE INDEX` — continuait d'afficher `Using filesort`. Cause identifiée : le tri
+demandé était `ORDER BY created_at DESC, id DESC` (le `id DESC` ajouté comme
+« tie-breaker » pour un curseur univoque) — un tri à **deux colonnes**, que MySQL 8.0
+refusait de servir depuis l'index même quand il était forcé. Un index qui existe et
+correspond en apparence à la requête ne garantit pas que l'optimiseur l'utilise pour le
+tri : vérifié, pas supposé.
+
+**Étape 3 — la vraie correction : trier sur la clé primaire.** `defaultSort('-id')`
+plutôt que `-created_at` : les `id` croissent dans l'ordre de création, donc « plus
+récent d'abord » reste vrai, et un tri sur la clé primaire ne filesort jamais. Mesuré :
+**42 ms** (contre 2,2 s). L'index `(project_id, created_at)` reste utile pour un tri
+explicite (`?sort=created_at`, plus rare) — conservé, jamais sur le chemin par défaut.
+
+**Étape 4 — `cursorPaginate()` plutôt que `paginate()`.** `OFFSET` reste coûteux quelle
+que soit sa taille, indépendamment de tout index : MySQL doit parcourir et jeter les
+lignes avant l'offset. Un curseur (`WHERE id < dernier_id_vu`) repart directement du bon
+endroit : **2,8 ms** en première page comme à 300 000 lignes de profondeur (même valeur,
+mesurée avec un `id` de référence obtenu une seule fois, hors chronométrage — jamais
+recalculé à chaque requête, contrairement à ce qu'un curseur naïf pourrait faire).
+Contrepartie assumée : plus de « page 42 sur 1000 », seulement précédent/suivant —
+`TaskResource::collection()` gère nativement un `CursorPaginator` (`data`/`links`, sans
+`meta.total`).
+Doc : https://laravel.com/docs/12.x/pagination#cursor-pagination
+
+**Étape 5 — trois niveaux de mesure, jusqu'au vrai constat.** Un test HTTP réel via
+`php artisan serve` donnait encore ~1,2 s — écart énorme avec les 42 ms mesurées en SQL
+brut. Décomposé : `kernel->handle()` **en process**, sans passer par le réseau, donnait
+**264 ms au premier appel** puis **22-25 ms** aux appels suivants dans le même process.
+`php artisan serve` (serveur de développement PHP intégré) répète le coût de démarrage
+à chaque requête, contrairement à un pool PHP-FPM qui reste chaud entre les requêtes —
+**pas représentatif de la production**, un piège de méthodologie de mesure plutôt qu'un
+vrai problème de code. Confirmé en désactivant Telescope (aucun effet, hypothèse écartée
+avant d'être retenue) puis en mesurant directement dans le process.
+
+### Validation du module
+
+`taskflow:seed-benchmark` génère un jeu de données réel de 500 000 tâches, mesuré à
+chaque étape ci-dessus, puis nettoyé (la commande reste, réutilisable). Aucune mesure à
+cette échelle n'est rejouée dans la suite de tests — seul le comportement (curseur, tri,
+absence de doublon/saut entre pages) l'est, à petite échelle
+(`CursorPaginationTest`, `TeamStatsCacheTest`, `PreventLazyLoadingTest`,
+`TaskSearchTest`). `php artisan test` : 110 tests verts, `pint`/`phpstan` verts.
+
+---

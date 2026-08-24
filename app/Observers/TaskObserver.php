@@ -7,6 +7,7 @@ use App\Events\TaskMoved;
 use App\Models\Task;
 use App\Models\User;
 use App\Notifications\TaskAssignedNotification;
+use App\Support\TeamStatsCache;
 
 class TaskObserver
 {
@@ -31,6 +32,7 @@ class TaskObserver
     public function created(Task $task): void
     {
         $this->notifyAssignee($task);
+        $this->invalidateTeamStats($task);
     }
 
     /**
@@ -47,11 +49,24 @@ class TaskObserver
             $from = $original instanceof TaskStatus ? $original : TaskStatus::from($original);
 
             event(new TaskMoved($task, $from, $task->status));
+
+            // Seul le statut (et completed_at, dérivé de lui) entre dans
+            // TeamStatsCache — un changement de titre ou d'assigné ne rend
+            // pas le cache obsolète, inutile de le vider pour ça.
+            $this->invalidateTeamStats($task);
         }
 
         if ($task->wasChanged('assignee_id')) {
             $this->notifyAssignee($task);
         }
+    }
+
+    /**
+     * Une tâche supprimée change tasks_count et tasks_by_status.
+     */
+    public function deleted(Task $task): void
+    {
+        $this->invalidateTeamStats($task);
     }
 
     /**
@@ -70,5 +85,10 @@ class TaskObserver
         }
 
         User::find($task->assignee_id)?->notify(new TaskAssignedNotification($task));
+    }
+
+    private function invalidateTeamStats(Task $task): void
+    {
+        TeamStatsCache::forget($task->project->team_id);
     }
 }

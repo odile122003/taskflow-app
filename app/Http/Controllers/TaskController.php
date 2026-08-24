@@ -12,6 +12,7 @@ use App\Http\Requests\UpdateTaskRequest;
 use App\Models\Project;
 use App\Models\Task;
 use App\Queries\TaskQuery;
+use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
 
@@ -27,9 +28,19 @@ class TaskController extends Controller implements HasMiddleware
     /**
      * Display a listing of the resource.
      */
-    public function index(Project $project)
+    public function index(Project $project, Request $request)
     {
         $this->authorize('view', $project);
+
+        if ($search = $request->string('search')->trim()->value()) {
+            // Remplace la version manuelle (LIKE '%...%') : tolère les fautes
+            // de frappe, trie par pertinence — voir CONCEPTS.md pour la douleur
+            // ressentie avant ce remplacement (typo introuvable, aucun tri).
+            return Task::search($search)
+                ->where('project_id', $project->id)
+                ->query(fn ($query) => $query->with(['assignee', 'tags']))
+                ->get();
+        }
 
         return TaskQuery::for($project)->get();
     }

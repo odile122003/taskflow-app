@@ -8,7 +8,7 @@ use App\Models\Project;
 use App\Models\Task;
 use App\Models\User;
 use App\Support\CurrentTeam;
-use Illuminate\Support\Collection;
+use App\Support\TeamStatsCache;
 
 class DashboardController extends Controller
 {
@@ -51,15 +51,13 @@ class DashboardController extends Controller
             ->limit(5)
             ->get();
 
-        // Exercice module 4 : pipeline de Collections plutôt qu'un foreach avec
-        // accumulateur — flatMap aplatit les tâches de tous les projets déjà chargés
-        // (aucune requête SQL supplémentaire, $projects est déjà en mémoire).
-        /** @var Collection<int, Task> $allTasks */
-        $allTasks = $projects->flatMap(fn (Project $project) => $project->tasks);
-
-        $statusCounts = $allTasks
-            ->groupBy(fn (Task $task) => $task->status->value)
-            ->map(fn (Collection $tasks) => $tasks->count());
+        // Module 12 : remplace le flatMap+groupBy en mémoire (Module 4) par
+        // un agrégat mis en cache. Ici le gain net sur *cette* page est modeste
+        // ($projects->tasks est déjà chargé pour l'affichage par carte) — le
+        // vrai bénéfice apparaît quand plusieurs endroits (ce tableau de bord,
+        // GET /team/stats) redemandent le même agrégat sans reconstruire la
+        // liste complète des tâches à chaque fois. Voir CONCEPTS.md.
+        $statusCounts = TeamStatsCache::remember($currentTeam->get())['tasks_by_status'];
 
         return view('dashboard', compact('projects', 'activities', 'topContributors', 'statusCounts'));
     }
