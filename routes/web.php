@@ -19,6 +19,9 @@ Route::middleware(['auth', 'verified', 'team.current'])->group(function () {
     Route::resource('projects', ProjectController::class);
     Route::get('projects/{project}/board', [ProjectController::class, 'board'])->name('projects.board');
     Route::resource('projects.tasks', TaskController::class)->scoped();
+    Route::patch('projects/{project}/tasks/{task}/move', [TaskController::class, 'move'])
+        ->scopeBindings()
+        ->name('tasks.move');
 
     Route::post('projects/{project}/tasks/{task}/attachments', [AttachmentController::class, 'store'])
         ->name('tasks.attachments.store');
