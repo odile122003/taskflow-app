@@ -12,13 +12,14 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Laravel\Scout\Searchable;
 
 /**
  * @property-read bool $is_overdue
  */
 class Task extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, Searchable, SoftDeletes;
 
     protected $fillable = ['project_id', 'assignee_id', 'parent_id', 'title', 'status', 'priority', 'due_date'];
 
@@ -27,6 +28,23 @@ class Task extends Model
         'completed_at' => 'datetime',
         'status' => TaskStatus::class,
     ];
+
+    /**
+     * project_id : seul champ filtrable dont Scout a besoin ici (recherche
+     * toujours restreinte à un projet, voir TaskController::index). Pas de
+     * status/priority — inutile d'indexer ce qu'on ne recherche jamais en
+     * plein texte, chaque champ en plus ralentit l'indexation.
+     *
+     * @return array<string, mixed>
+     */
+    public function toSearchableArray(): array
+    {
+        return [
+            'id' => $this->id,
+            'title' => $this->title,
+            'project_id' => $this->project_id,
+        ];
+    }
 
     /**
      * Accessor moderne (Attribute::make) : $task->is_overdue, calculé, jamais stocké.

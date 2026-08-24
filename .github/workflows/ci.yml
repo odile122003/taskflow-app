@@ -10,6 +10,24 @@ jobs:
     name: Pint + Larastan + Pest
     runs-on: ubuntu-latest
 
+    # Scout (Module 12) interroge un vrai Meilisearch pendant les tests -
+    # phpunit.xml ne fixe pas SCOUT_DRIVER comme il fixe CACHE_STORE=array,
+    # donc .env.example (SCOUT_DRIVER=meilisearch) s'applique tel quel ici
+    # aussi. Le healthcheck bloque le démarrage des steps tant que le
+    # service n'est pas prêt, pas besoin d'attendre à la main.
+    services:
+      meilisearch:
+        image: getmeili/meilisearch:v1.53
+        ports:
+          - 7700:7700
+        env:
+          MEILI_NO_ANALYTICS: true
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:7700/health || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +60,12 @@ jobs:
 
       - name: Directory permissions
         run: chmod -R 777 storage bootstrap/cache
+
+      # project_id doit être déclaré filterable avant le premier ->where()
+      # dessus (Task::search()->where('project_id', ...)) - update() ne
+      # pousse jamais les réglages tout seul, seule cette commande le fait.
+      - name: Sync Meilisearch index settings
+        run: php artisan scout:sync-index-settings
 
       # Base SQLite en mémoire (phpunit.xml) : aucun service MySQL nécessaire
       # pour les tests, ils tournent identiquement en local et en CI.
