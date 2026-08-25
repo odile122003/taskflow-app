@@ -15,6 +15,15 @@ use Illuminate\Support\Facades\Cache;
  * Invalidation par événement : TaskObserver et ProjectObserver appellent
  * forget() dès qu'une écriture peut changer un de ces nombres, plutôt que
  * de compter sur le TTL seul.
+ *
+ * `config('cache.stats_store')` plutôt que le store par défaut global :
+ * cette classe est la seule chose de l'application qui a vraiment besoin de
+ * Redis (pour les tags). Faire de Redis le store par défaut de *toute*
+ * l'app (sessions, rate limiter de connexion...) rendait la connexion
+ * elle-même indisponible dès que Redis (lancé dans WSL sur cette machine)
+ * tombait — trouvé en pratique quand une simple connexion (`POST /login`)
+ * a jeté une `StreamInitException`. `CACHE_STATS_STORE=array` en test
+ * (phpunit.xml) : les tests n'ont jamais besoin d'un vrai Redis.
  */
 final class TeamStatsCache
 {
@@ -25,7 +34,7 @@ final class TeamStatsCache
      */
     public static function remember(Team $team): array
     {
-        return Cache::tags([self::tag($team->id)])->remember(
+        return Cache::store(config('cache.stats_store'))->tags([self::tag($team->id)])->remember(
             'stats',
             now()->addMinutes(self::TTL_MINUTES),
             fn () => self::compute($team),
@@ -34,7 +43,7 @@ final class TeamStatsCache
 
     public static function forget(int $teamId): void
     {
-        Cache::tags([self::tag($teamId)])->flush();
+        Cache::store(config('cache.stats_store'))->tags([self::tag($teamId)])->flush();
     }
 
     private static function tag(int $teamId): string

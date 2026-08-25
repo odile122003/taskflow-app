@@ -19,6 +19,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Cache Store For Tag-Based Caching
+    |--------------------------------------------------------------------------
+    |
+    | Cache::tags() only works on a handful of drivers (array, redis,
+    | memcached, dynamodb) — never database or file. TeamStatsCache is the
+    | only place in the app that needs tags, so it targets this store
+    | explicitly instead of the global default: the rest of the app (session
+    | rate limiting included) stays on a store that's always available,
+    | independent of whether Redis happens to be reachable. Tests override
+    | this to "array" (see phpunit.xml) so they never need a real Redis.
+    |
+    */
+
+    'stats_store' => env('CACHE_STATS_STORE', 'redis'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Cache Stores
     |--------------------------------------------------------------------------
     |

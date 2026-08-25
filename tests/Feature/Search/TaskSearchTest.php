@@ -9,7 +9,15 @@ use App\Models\Task;
  * frappe et ne triait jamais par pertinence — les deux points que ces
  * tests vérifient maintenant pour de vrai. waitForMeilisearch() (tests/Pest.php)
  * attend la fin réelle de l'indexation avant chaque recherche.
+ *
+ * SCOUT_DRIVER=collection est la valeur par défaut des tests (phpunit.xml) -
+ * tout le reste de la suite n'a pas besoin d'un vrai Meilisearch pour
+ * simplement créer une tâche. Ce fichier restaure le vrai moteur car c'est
+ * justement son comportement (tolérance aux fautes) qui est testé ici ; le
+ * driver "collection" ne le reproduirait pas.
  */
+beforeEach(fn () => config(['scout.driver' => 'meilisearch']));
+
 it('finds a task by an exact substring of its title', function () {
     $project = Project::factory()->create();
     $user = memberOf($project->team);
