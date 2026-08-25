@@ -30,6 +30,14 @@ class AppServiceProvider extends ServiceProvider
         // vers une autre implémentation (ex. InMemoryAttachmentStorage dans
         // les tests, via $this->app->bind() dans le test lui-même).
         $this->app->bind(AttachmentStorage::class, DiskAttachmentStorage::class);
+
+        // Enregistrement conditionnel, jamais dans bootstrap/providers.php :
+        // Telescope n'est installé qu'en --dev (Module 8). En production,
+        // `composer install --no-dev` ne pose pas le package du tout — la
+        // classe parente de TelescopeServiceProvider n'existerait plus.
+        if ($this->app->isLocal()) {
+            $this->app->register(TelescopeServiceProvider::class);
+        }
     }
 
     /**
